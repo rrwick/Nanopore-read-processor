@@ -17,7 +17,8 @@ import subprocess
 import sys
 import h5py
 from multiprocessing.dummy import Pool as ThreadPool
-from multiprocessing import cpu_count
+import multiprocessing
+import re
 
 
 def main():
@@ -61,9 +62,9 @@ def main():
         if 'sort' in args.commands:
             sample.sort_reads()
         if 'basecall' in args.commands:
-            sample.basecall_where_necessary(args.threads)
+            sample.basecall_where_necessary(args.nanonet_threads)
         if 'fastq' in args.commands:
-            sample.extract_fastq(args.min_fastq_length)
+            sample.extract_fastq(args.min_fastq_length, args.alignment_threads)
         if 'tarball' in args.commands:
             sample.gzip_fast5s()
 
@@ -80,8 +81,10 @@ def get_arguments():
     parser.add_argument('--samples', nargs='+', required=True, type=str,
                         help='Which samples to process - can be a partial name match or "all" to '
                              'process all samples')
-    parser.add_argument('--threads', type=int, default=argparse.SUPPRESS,
+    parser.add_argument('--nanonet_threads', type=int, default=argparse.SUPPRESS,
                         help='The number of threads to use for nanonet')
+    parser.add_argument('--alignment_threads', type=int, default=argparse.SUPPRESS,
+                        help='The number of threads to use for aligning reads')
     parser.add_argument('--min_fastq_length', type=int, default=100,
                         help='Reads shorter than this length (in bp) will not be included in the '
                              'FASTQ files')
@@ -92,9 +95,14 @@ def get_arguments():
         args.commands = ['sort', 'basecall', 'fastq', 'tarball']
 
     try:
-        args.threads
+        args.nanonet_threads
     except AttributeError:
-        args.threads = min(cpu_count(), 8)
+        args.nanonet_threads = min(multiprocessing.cpu_count(), 8)
+
+    try:
+        args.alignment_threads
+    except AttributeError:
+        args.alignment_threads = multiprocessing.cpu_count()
 
     return args
 
@@ -204,6 +212,15 @@ class Sample(object):
         self.all_fast5_files = []
         self.fast5_counts = {}
 
+        # Find a reference, if one exists.
+        ref_dir = '/home/UNIMELB/inouye-hpc-sa/nanopore-data/references'
+        ref_files = [f for f in os.listdir(ref_dir)
+                     if f.endswith('.fasta') and self.name in f]
+        if ref_files:
+            self.reference = os.path.join(ref_dir, ref_files[0])
+        else:
+            self.reference = None
+
     def __repr__(self):
         return self.name + ': ' + ', '.join(self.all_dirs)
 
@@ -233,30 +250,26 @@ class Sample(object):
         print('\n\n' + bold_yellow_underline(self.name))
         self.print_read_dirs()
 
-    def extract_fastq(self, min_length):
+    def extract_fastq(self, min_length, threads):
         if not self.all_dirs:
             return
 
         print('\nextracting FASTQs from reads...', flush=True)
         fastq_filename, info_filename = self.get_fastq_paths()
 
-        with gzip.open(fastq_filename, 'wt') as fastq, open(info_filename, 'wt') as info:
-
-            info.write('\t'.join(['Read filename', 'Sample name', 'Library type', 'Run name',
-                                  'Flowcell ID', 'Channel number', 'Basecalling', 'Read type',
-                                  'Length', 'Mean qscore']) + '\n')
-
+        table_lines = []
+        with gzip.open(fastq_filename, 'wt') as fastq:
             total_count = 0
             fastq_count = 0
             fast5_count_digits = len(str(len(self.all_fast5_files)))
             for fast5_file in self.all_fast5_files:
 
-                read_name = os.path.basename(fast5_file)
+                read_filename = os.path.basename(fast5_file)
                 sample_name = self.name[:-3]
                 library_type = self.name[-2:]
 
-                run_name, flowcell_id, channel_number, basecalling, read_type, length_str, \
-                    mean_qscore, fastq_str = '', '', '', '', '', '', '', ''
+                run_name, flowcell_id, channel_number, basecalling, read_name, read_type, \
+                    length_str, mean_qscore, fastq_str = '', '', '', '', '', '', '', '', ''
                 length = 0
 
                 try:
@@ -286,6 +299,7 @@ class Sample(object):
                 if fastq_str:
                     try:
                         parts = fastq_str.split('\n')
+                        read_name = parts[0][1:]
                         length = len(parts[1])
                         mean_qscore = '%.2f' % (sum([ord(c) - 33 for c in parts[3]]) / length)
                     except (IndexError, ZeroDivisionError):
@@ -294,9 +308,9 @@ class Sample(object):
                 if length > 0:
                     length_str = str(length)
 
-                info.write('\t'.join([read_name, sample_name, library_type, run_name, flowcell_id,
-                                      channel_number, basecalling, read_type, length_str,
-                                      mean_qscore]) + '\n')
+                table_lines.append([read_filename, sample_name, library_type, run_name,
+                                    flowcell_id, channel_number, basecalling, read_name, read_type,
+                                    length_str, mean_qscore])
 
                 total_count += 1
                 if fastq_str and length >= min_length:
@@ -305,8 +319,38 @@ class Sample(object):
 
                 print('\r' + '  reads processed: ' + str(total_count).rjust(fast5_count_digits) +
                       '    reads added to FASTQ: ' + str(fastq_count).rjust(fast5_count_digits) +
-                      ' ',
-                      end='', flush=True)
+                      ' ', end='', flush=True)
+
+        # If a reference exists, use Unicycler align to align the reads to get the identity.
+        alignment_results = {}
+        if self.reference:
+            temp_sam = 'temp_' + str(random.randint(0, 100000000)) + '.sam'
+            command = ['/home/UNIMELB/inouye-hpc-sa/Unicycler/unicycler_align-runner.py',
+                       '--ref', self.reference, '--reads', fastq_filename, '--sam', temp_sam,
+                       '--no_graphmap', '--threads', str(threads), '--verbosity', '2',
+                       '--contamination', 'lambda', '--keep_bad', '--min_len', '1']
+            out = subprocess.check_output(command, stderr=subprocess.STDOUT, shell=False)
+            os.remove(temp_sam)
+            alignment_results = parse_unicycler_align_output(out, os.path.basename(self.reference))
+
+        # Write the table results to a text file.
+        with open(info_filename, 'wt') as info:
+            header = ['Filename', 'Sample name', 'Library type', 'Run name', 'Flowcell ID',
+                      'Channel number', 'Basecalling', 'Read name', 'Read type', 'Length',
+                      'Mean qscore']
+            if self.reference:
+                header += ['Alignment identity', 'Alignment reference']
+            info.write('\t'.join(header) + '\n')
+            for table_line in table_lines:
+                if self.reference:
+                    read_name = table_line[7]
+                    try:
+                        table_line += list(alignment_results[read_name])
+                    except KeyError:
+                        table_line += ['', '']
+                info.write('\t'.join(table_line))
+                info.write('\n')
+
         print()
 
     def print_read_dirs(self):
@@ -681,6 +725,63 @@ def get_fast5_metadata(hdf5_file, names, dset_name, attribute):
         return hdf5_file[dset].attrs[attribute].decode()
     except KeyError:
         return ''
+
+
+def weighted_average_list(nums, weights):
+    w_sum = sum(weights)
+    if w_sum == 0.0:
+        return 0.0
+    else:
+        return sum(num * (weights[i] / w_sum) for i, num in enumerate(nums))
+
+
+def parse_unicycler_align_output(unicycler_out_string, reference_filename):
+    """
+    Returns a dictionary with a key of the read name and a value of a tuple containing the mean
+    alignment identity (as a string) and a Y/N for whether the alignment was to the lambda phage.
+    """
+    read_line_re = re.compile(r'^\d+/\d+.+\(\d+ bp\)')
+    unicycler_out = unicycler_out_string.split('\n')
+    results = {}
+    for line in unicycler_out:
+        line = line.strip()
+        if read_line_re.match(line):
+            read_name = line.split(': ')[1].split(' (')[0]
+            read_length = int(line.split('(')[-1].split(' bp)')[0])
+            alignments = []
+            while True:
+                try:
+                    next_line = next(unicycler_out).strip()
+                    if not next_line or next_line == 'None' or next_line == 'too short to align':
+                        break
+                    alignments.append(next_line)
+                except StopIteration:
+                    break
+            identities = []
+            lengths = []
+            lambda_lengths = []
+            for alignment in alignments:
+                identities.append(float(alignment.split('ID: ')[1].split('%')[0]))
+                read_start = int(alignment.split('read pos: ')[1].split('-')[0])
+                read_end = int(alignment.split(', strand')[0].split('-')[1])
+                alignment_length = read_end - read_start
+                lengths.append(alignment_length)
+                if 'lambda_phage' in alignment:
+                    lambda_lengths.append(alignment_length)
+            total_aligned_length = sum(lengths)
+            total_lambda_aligned_length = sum(lengths)
+            reference_name = reference_filename
+            if total_aligned_length / read_length < 0.5:
+                mean_identity = 0.0
+            else:
+                mean_identity = weighted_average_list(identities, lengths)
+                if total_lambda_aligned_length / total_aligned_length > 0.5:
+                    reference_name = 'lambda phage'
+            if mean_identity > 0.0:
+                results[read_name] = ('%.2f' % mean_identity, reference_name)
+            else:
+                results[read_name] = ('', '')
+    return results
 
 
 if __name__ == '__main__':
