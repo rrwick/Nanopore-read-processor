@@ -98,98 +98,9 @@ def get_arguments():
     return args
 
 
-# def quality_table_header():
-#     print('\t'.join(['Fast5 file',
-#                      'Directory',
-#                      '2D qscore',
-#                      'Template qscore',
-#                      'Complement qscore']))
-#
-#
-# def quality_table(sample):
-#     for fast5_file in sample.all_fast5_files:
-#         print('\t'.join([os.path.basename(fast5_file),
-#                          os.path.dirname(fast5_file),
-#                          str(get_mean_2d_qscore(fast5_file)),
-#                          str(get_mean_template_qscore(fast5_file)),
-#                          str(get_mean_complement_qscore(fast5_file))]))
-#
-
 def quit_with_error(message):
     print('Error:', message, file=sys.stderr)
     sys.exit(1)
-
-#
-# def run_poretools_fastq_multiple_dirs(read_dirs, read_type, fastq_full, fastq_short, min_length):
-#     fastq_dir = os.path.dirname(fastq_full)
-#     if not os.path.exists(fastq_dir):
-#         os.makedirs(fastq_dir)
-#     out, err = '', ''
-#     for read_dir in read_dirs:
-#         out, err = run_poretools_fastq(read_dir, read_type, out, err, min_length)
-#     save_fastq(fastq_full, out)
-#     print('  saved to file: ' + fastq_short)
-#     if err:
-#         error_full = fastq_full.replace('.fastq.gz', '.err')
-#         error_short = fastq_short.replace('.fastq.gz', '.err')
-#         save_text(error_full, err)
-#         print('  WARNING: errors saved to file ' + error_short)
-#     sys.stdout.flush()
-
-#
-# def run_poretools_fastq(dir_name, read_type, out, err, min_length):
-#     print('  poretools fastq --type ' + read_type + ' ' + dir_name)
-#     sys.stdout.flush()
-#     all_fast5_files = []
-#     all_fast5_files += [os.path.join(dir_name, f) for f in os.listdir(dir_name)
-#                         if f.endswith('.fast5')]
-#     fast5_file_groups = [all_fast5_files[i:i + 100] for i in xrange(0, len(all_fast5_files), 100)]
-#     for fast5_file_group in fast5_file_groups:
-#         poretools_fastq_cmd = ['/home/UNIMELB/inouye-hpc-sa/poretools/poretools-runner.py',
-#                                'fastq', '--type', read_type,
-#                                '--min-length', str(min_length)] + fast5_file_group
-#         poretools = subprocess.Popen(poretools_fastq_cmd,
-#                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-#         read_out, read_err = poretools.communicate()
-#         poretools.wait()
-#         if read_out.startswith(b'@'):
-#             out += read_out
-#             err += read_err
-#     return out, err
-
-
-# def run_poretools_stats_multiple_dirs(read_dirs, read_type, stats_full, stats_short):
-#     out, err = '', ''
-#     for read_dir in read_dirs:
-#         out, err = run_poretools_stats(read_dir, read_type, out, err)
-#     save_text(stats_full, out)
-#     print('  saved to file: ' + stats_short)
-#     sys.stdout.flush()
-#
-#
-# def run_poretools_stats(dir_name, read_type, current_out, current_err):
-#     print('  poretools stats --type ' + read_type + ' ' + dir_name)
-#     sys.stdout.flush()
-#     poretools_stats_cmd = ['/home/UNIMELB/inouye-hpc-sa/poretools/poretools-runner.py', 'stats',
-#                            '--type', read_type,
-#                            dir_name]
-#     poretools = subprocess.Popen(poretools_stats_cmd,
-#                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-#     out, err = poretools.communicate()
-#     poretools.wait()
-#     return current_out + dir_name + ':\n' + out + '\n', current_err + err
-
-
-# def save_fastq(filepath, contents):
-#     if not filepath.endswith('.gz'):
-#         filepath += '.gz'
-#     with gzip.open(filepath, 'wb') as f:
-#         f.write(contents)
-
-
-# def save_text(filepath, contents):
-#     with open(filepath, 'wt') as f:
-#         f.write(contents)
 
 
 def get_most_recent_fast5_mod_date(directories):
@@ -383,37 +294,6 @@ class Sample(object):
                 if fastq_str and length >= min_length:
                     fastq.write(fastq_str)
 
-        # fastq_groups = [os.path.basename(os.path.normpath(x)) for x in self.all_dirs
-        #                 if 'no_basecall' not in x] + ['all']
-        #
-        # for fastq_group in fastq_groups:
-        #     all_fastq_short, best_fastq_short, \
-        #         all_fastq_full, best_fastq_full = self.get_fastq_filenames(fastq_group)
-        #     all_stats_short, best_stats_short, \
-        #         all_stats_full, best_stats_full = self.get_stats_filenames(fastq_group)
-        #
-        #     if os.path.exists(all_fastq_full):
-        #         os.remove(all_fastq_full)
-        #     if os.path.exists(best_fastq_full):
-        #         os.remove(best_fastq_full)
-        #     if os.path.exists(all_stats_full):
-        #         os.remove(all_stats_full)
-        #     if os.path.exists(best_stats_full):
-        #         os.remove(best_stats_full)
-        #
-        #     if fastq_group == 'all':
-        #         read_dirs = [x for x in self.all_dirs if 'no_basecall' not in x]
-        #     else:
-        #         read_dirs = [x for x in self.all_dirs if fastq_group in x]
-        #
-        #     run_poretools_fastq_multiple_dirs(read_dirs, 'all', all_fastq_full, all_fastq_short,
-        #                                       min_length)
-        #     run_poretools_stats_multiple_dirs(read_dirs, 'all', all_stats_full, all_stats_short)
-        #     run_poretools_fastq_multiple_dirs(read_dirs, 'best', best_fastq_full,
-        #                                       best_fastq_short, min_length)
-        #     run_poretools_stats_multiple_dirs(read_dirs, 'best', best_stats_full,
-        #                                       best_stats_short)
-
     def print_read_dirs(self):
         read_dirs = self.all_dirs
         if not read_dirs:
@@ -435,38 +315,6 @@ class Sample(object):
                 dir_name += ' reads)'
             print(dir_name)
         sys.stdout.flush()
-
-    # def get_fastq_filenames(self, fastq_group):
-    #     if fastq_group == 'all':
-    #         all_fastq_short = self.name + '_all.fastq.gz'
-    #         best_fastq_short = self.name + '_best.fastq.gz'
-    #     else:
-    #         all_fastq_short = self.name + '_' + fastq_group + '_all.fastq.gz'
-    #         best_fastq_short = self.name + '_' + fastq_group + '_best.fastq.gz'
-    #     all_fastq_full = '/home/UNIMELB/inouye-hpc-sa/nanopore-data/fastq/' + self.name + '/'
-    #     best_fastq_full = '/home/UNIMELB/inouye-hpc-sa/nanopore-data/fastq/' + self.name + '/'
-    #     if fastq_group != 'all':
-    #         all_fastq_full += 'grouped/'
-    #         best_fastq_full += 'grouped/'
-    #     all_fastq_full += all_fastq_short
-    #     best_fastq_full += best_fastq_short
-    #     return all_fastq_short, best_fastq_short, all_fastq_full, best_fastq_full
-
-    # def get_stats_filenames(self, fastq_group):
-    #     if fastq_group == 'all':
-    #         all_stats_short = self.name + '_all_stats.txt'
-    #         best_stats_short = self.name + '_best_stats.txt'
-    #     else:
-    #         all_stats_short = self.name + '_' + fastq_group + '_all_stats.txt'
-    #         best_stats_short = self.name + '_' + fastq_group + '_best_stats.txt'
-    #     all_stats_full = '/home/UNIMELB/inouye-hpc-sa/nanopore-data/fastq/' + self.name + '/'
-    #     best_stats_full = '/home/UNIMELB/inouye-hpc-sa/nanopore-data/fastq/' + self.name + '/'
-    #     if fastq_group != 'all':
-    #         all_stats_full += 'grouped/'
-    #         best_stats_full += 'grouped/'
-    #     all_stats_full += all_stats_short
-    #     best_stats_full += best_stats_short
-    #     return all_stats_short, best_stats_short, all_stats_full, best_stats_full
 
     def get_tarball_path(self):
         tarball_dir = '/home/UNIMELB/inouye-hpc-sa/nanopore-data/fast5-gz/'
