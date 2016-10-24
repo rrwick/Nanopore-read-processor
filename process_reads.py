@@ -44,18 +44,19 @@ def main():
             samples[name].add_dir(dir_name)
 
     # Determine which samples to process. If all, they are sorted by increasing read count so the
-    # fast ones are processed first.
+    # small ones are processed first.
     samples_by_read_count = sorted(samples.values(), key=lambda x: len(x.all_fast5_files))
     if 'all' in args.samples:
-        samples_to_process = samples_by_read_count
+        samples_to_process = [x.name for x in samples_by_read_count]
     else:
         samples_to_process = []
         for user_specified_sample in args.samples:
             for sample in samples_by_read_count:
-                if user_specified_sample in sample and sample not in samples_to_process:
-                    samples_to_process.append(sample)
+                if user_specified_sample in sample.name and sample.name not in samples_to_process:
+                    samples_to_process.append(sample.name)
 
-    for sample in samples_to_process:
+    for sample_name in samples_to_process:
+        sample = samples[sample_name]
         sample.print_header()
         if 'sort' in args.commands:
             sample.sort_reads()
@@ -172,7 +173,7 @@ def get_mean_2d_qscore(filename):
 
 
 def get_mean_score(hdf5_file, basecall_location):
-    q = hdf5_file[basecall_location].value.split('\n')[3]
+    q = hdf5_file[basecall_location].value.decode().split('\n')[3]
     return sum([ord(c)-33 for c in q]) / float(len(q))
 
 
@@ -236,16 +237,18 @@ class Sample(object):
         if not self.all_dirs:
             return
 
-        print('\nextracting FASTQs from reads...')
-        sys.stdout.flush()
+        print('\nextracting FASTQs from reads...', flush=True)
         fastq_filename, info_filename = self.get_fastq_paths()
 
-        with gzip.open(fastq_filename, 'wb') as fastq, open(info_filename, 'wt') as info:
+        with gzip.open(fastq_filename, 'wt') as fastq, open(info_filename, 'wt') as info:
 
             info.write('\t'.join(['Read filename', 'Sample name', 'Library type', 'Run name',
                                   'Flowcell ID', 'Channel number', 'Basecalling', 'Read type',
                                   'Length', 'Mean qscore']) + '\n')
 
+            total_count = 0
+            fastq_count = 0
+            fast5_count_digits = len(str(len(self.all_fast5_files)))
             for fast5_file in self.all_fast5_files:
 
                 read_name = os.path.basename(fast5_file)
@@ -273,7 +276,7 @@ class Sample(object):
 
                     basecall_location, read_type = get_best_fastq_hdf5_location(hdf5_file, names)
                     if basecall_location:
-                        fastq_str = hdf5_file[basecall_location].value
+                        fastq_str = hdf5_file[basecall_location].value.decode()
                     else:
                         basecalling = 'none'
 
@@ -294,8 +297,17 @@ class Sample(object):
                 info.write('\t'.join([read_name, sample_name, library_type, run_name, flowcell_id,
                                       channel_number, basecalling, read_type, length_str,
                                       mean_qscore]) + '\n')
+
+                total_count += 1
                 if fastq_str and length >= min_length:
+                    fastq_count += 1
                     fastq.write(fastq_str)
+
+                print('\r' + '  reads processed: ' + str(total_count).rjust(fast5_count_digits) +
+                      '    reads added to FASTQ: ' + str(fastq_count).rjust(fast5_count_digits) +
+                      ' ',
+                      end='', flush=True)
+        print()
 
     def print_read_dirs(self):
         read_dirs = self.all_dirs
@@ -316,8 +328,7 @@ class Sample(object):
                 dir_name += ' read)'
             else:
                 dir_name += ' reads)'
-            print(dir_name)
-        sys.stdout.flush()
+            print(dir_name, flush=True)
 
     def get_tarball_path(self):
         tarball_dir = '/home/UNIMELB/inouye-hpc-sa/nanopore-data/fast5-gz/'
@@ -339,8 +350,7 @@ class Sample(object):
             print(tarball.split('/')[-1] + ' already exists\n')
             return
 
-        print('\ngzipping reads into a tar.gz file...')
-        sys.stdout.flush()
+        print('\ngzipping reads into a tar.gz file...', flush=True)
 
         base_dir = self.base_dir
         if not base_dir.endswith('/'):
@@ -355,8 +365,7 @@ class Sample(object):
         os.chdir(self.base_dir)
 
         tar_cmd = ['tar', '-czvf', tarball] + rel_dirs
-        print('  ' + ' '.join(tar_cmd))
-        sys.stdout.flush()
+        print('  ' + ' '.join(tar_cmd), flush=True)
         tar = subprocess.Popen(tar_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         _, _ = tar.communicate()
         tar.wait()
@@ -372,8 +381,7 @@ class Sample(object):
         prog_name = 'nanonetcall' if self.library_type == '1d' else 'nanonet2d'
         print('\nrunning ' + prog_name + ' on any', self.name, 'reads lacking base calls...')
         header = 'Already basecalled    Nanonet succeeded    Nanonet failed'
-        print('  ' + bold_underline(header))
-        sys.stdout.flush()
+        print('  ' + bold_underline(header), flush=True)
 
         if self.library_type == '1d':
             self.basecall_where_necessary_1d(all_fast5s_no_basecall_first, threads)
@@ -399,8 +407,7 @@ class Sample(object):
                     self.move_read_to_no_basecall(fast5_file)
             print('\r' + '  ' + str(had_fastq_count).rjust(18) +
                   green(str(basecall_successful).rjust(21)) +
-                  red(str(basecall_failed).rjust(18)) + ' ', end='')
-            sys.stdout.flush()
+                  red(str(basecall_failed).rjust(18)) + ' ', end='', flush=True)
 
     def basecall_where_necessary_2d(self, all_fast5s, threads):
         had_fastq_count, basecall_successful, basecall_failed = 0, 0, 0
@@ -419,12 +426,10 @@ class Sample(object):
                     self.move_read_to_no_basecall(fast5_file)
             print('\r' + '  ' + str(had_fastq_count).rjust(18) +
                   green(str(basecall_successful).rjust(21)) +
-                  red(str(basecall_failed).rjust(18)) + ' ', end='')
-            sys.stdout.flush()
+                  red(str(basecall_failed).rjust(18)) + ' ', end='', flush=True)
 
     def sort_reads(self):
-        print('\nsorting reads into proper directories...')
-        sys.stdout.flush()
+        print('\nsorting reads into proper directories...', flush=True)
 
         sorted_fast5_files, unsorted_fast5_files = [], []
         for fast5_file in self.all_fast5_files:
@@ -483,12 +488,11 @@ class Sample(object):
             print('  no reads needed to be moved')
         else:
             if moved_to_no_basecall:
-                print('  ' + str(moved_to_no_basecall) + ' reads moved to no_basecall/')
+                print('  ' + str(moved_to_no_basecall) + ' reads moved to no_basecall/', flush=True)
             if moved_to_basecalled:
-                print('  ' + str(moved_to_basecalled) + ' reads moved to basecalled/')
+                print('  ' + str(moved_to_basecalled) + ' reads moved to basecalled/', flush=True)
             if moved_to_nanonet:
-                print('  ' + str(moved_to_nanonet) + ' reads moved to nanonet/')
-        sys.stdout.flush()
+                print('  ' + str(moved_to_nanonet) + ' reads moved to nanonet/', flush=True)
 
     def sort_reads_2d(self, sorted_fast5_files, unsorted_fast5_files):
         moved_to_no_basecall, moved_to_pass, moved_to_fail, moved_to_nanonet = 0, 0, 0, 0
@@ -520,14 +524,13 @@ class Sample(object):
             print('  no reads needed to be moved')
         else:
             if moved_to_no_basecall:
-                print('  ' + str(moved_to_no_basecall) + ' reads moved to no_basecall/')
+                print('  ' + str(moved_to_no_basecall) + ' reads moved to no_basecall/', flush=True)
             if moved_to_pass:
-                print('  ' + str(moved_to_pass) + ' reads moved to pass/')
+                print('  ' + str(moved_to_pass) + ' reads moved to pass/', flush=True)
             if moved_to_fail:
-                print('  ' + str(moved_to_fail) + ' reads moved to fail/')
+                print('  ' + str(moved_to_fail) + ' reads moved to fail/', flush=True)
             if moved_to_nanonet:
-                print('  ' + str(moved_to_nanonet) + ' reads moved to nanonet/')
-        sys.stdout.flush()
+                print('  ' + str(moved_to_nanonet) + ' reads moved to nanonet/', flush=True)
 
     def move_read_to_pass(self, fast5_file):
         pass_dir = os.path.join(self.base_dir, 'pass')
@@ -664,7 +667,7 @@ def get_best_fastq_hdf5_location(hdf5_file, names):
 
     else:
         basecall_location = None
-        fastq_type = 'none'
+        fastq_type = ''
 
     return basecall_location, fastq_type
 
