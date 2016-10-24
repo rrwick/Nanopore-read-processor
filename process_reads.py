@@ -43,19 +43,19 @@ def main():
                 samples[name] = Sample(name, base_dir, library_type)
             samples[name].add_dir(dir_name)
 
-    for sample in sorted(samples.values(), key=lambda x: len(x.all_fast5_files)):
+    # Determine which samples to process. If all, they are sorted by increasing read count so the
+    # fast ones are processed first.
+    samples_by_read_count = sorted(samples.values(), key=lambda x: len(x.all_fast5_files))
+    if 'all' in args.samples:
+        samples_to_process = samples_by_read_count
+    else:
+        samples_to_process = []
+        for user_specified_sample in args.samples:
+            for sample in samples_by_read_count:
+                if user_specified_sample in sample and sample not in samples_to_process:
+                    samples_to_process.append(sample)
 
-        # Proceed with this sample only if the user asked for it (complete or partial name match)
-        # or asked for all samples.
-        include = False
-        for arg_sample in args.samples:
-            if arg_sample == 'all':
-                include = True
-            elif arg_sample in sample.name:
-                include = True
-        if not include:
-            continue
-
+    for sample in samples_to_process:
         sample.print_header()
         if 'sort' in args.commands:
             sample.sort_reads()
@@ -209,16 +209,19 @@ class Sample(object):
     def add_dir(self, dir_name):
         self.all_dirs.append(dir_name)
         self.all_dirs = sorted(self.all_dirs)
+        self.find_all_fast5s_in_dirs()
 
+    def find_all_fast5s_in_dirs(self):
+        """
+        Finds and stores all fast5 files in the sample's directories. For consistency, the reads
+        are sorted by their channel number and read number.
+        """
         self.all_fast5_files = []
         for read_dir in self.all_dirs:
             fast5_files = [os.path.join(read_dir, f) for f in os.listdir(read_dir)
                            if f.endswith('.fast5')]
             self.all_fast5_files += fast5_files
-            if read_dir == dir_name:
-                self.fast5_counts[dir_name] = len(fast5_files)
-
-        # For consistency, sort the reads by their channel number and read number.
+            self.fast5_counts[read_dir] = len(fast5_files)
         self.all_fast5_files = sorted(self.all_fast5_files,
                                       key=lambda x: (999999 if '_ch' not in x else
                                                      int(x.split('_ch')[1].split('_')[0]),
@@ -361,7 +364,8 @@ class Sample(object):
 
     def basecall_where_necessary(self, threads):
 
-        # Bring the fast5 files in the /no_basecall/
+        # Bring the fast5 files in the /no_basecall/ directory to the front of the list,
+        # as they are the ones which actually need the basecalling.
         all_fast5s_no_basecall_first = [x for x in self.all_fast5_files if 'no_basecall' in x] + \
                                        [x for x in self.all_fast5_files if 'no_basecall' not in x]
 
@@ -421,20 +425,38 @@ class Sample(object):
     def sort_reads(self):
         print('\nsorting reads into proper directories...')
         sys.stdout.flush()
-        if self.library_type == '1d':
-            self.sort_reads_1d()
-        elif self.library_type == '2d':
-            self.sort_reads_2d()
 
-    def sort_reads_1d(self):
         sorted_fast5_files, unsorted_fast5_files = [], []
         for fast5_file in self.all_fast5_files:
             if '/basecalled/' in fast5_file or '/nanonet/' in fast5_file or \
-                    '/no_basecall/' in fast5_file:
+                    '/no_basecall/' in fast5_file or '/pass/' in fast5_file or \
+                    '/fail/' in fast5_file:
                 sorted_fast5_files.append(fast5_file)
             else:
                 unsorted_fast5_files.append(fast5_file)
 
+        if self.library_type == '1d':
+            self.sort_reads_1d(sorted_fast5_files, unsorted_fast5_files)
+        elif self.library_type == '2d':
+            self.sort_reads_2d(sorted_fast5_files, unsorted_fast5_files)
+
+        # Delete any read directories which are now empty.
+        for directory in self.all_dirs:
+            try:
+                os.rmdir(directory)
+            except OSError:
+                pass
+
+        # Remake the sample's directories and files.
+        potential_dirs = [os.path.join(self.base_dir, x) for x in os.listdir(self.base_dir)
+                          if os.path.isdir(os.path.join(self.base_dir, x))]
+        self.all_dirs = []
+        for potential_dir in potential_dirs:
+            if any(f.endswith('.fast5') for f in os.listdir(potential_dir)):
+                self.all_dirs.append(potential_dir)
+        self.find_all_fast5s_in_dirs()
+
+    def sort_reads_1d(self, sorted_fast5_files, unsorted_fast5_files):
         moved_to_no_basecall, moved_to_basecalled, moved_to_nanonet = 0, 0, 0
 
         # For reads not yet sorted, move them either into basecalled/ or no_basecall/.
@@ -468,15 +490,7 @@ class Sample(object):
                 print('  ' + str(moved_to_nanonet) + ' reads moved to nanonet/')
         sys.stdout.flush()
 
-    def sort_reads_2d(self):
-        sorted_fast5_files, unsorted_fast5_files = [], []
-        for fast5_file in self.all_fast5_files:
-            if '/pass/' in fast5_file or '/fail/' in fast5_file or '/nanonet/' in fast5_file or \
-                    '/no_basecall/' in fast5_file:
-                sorted_fast5_files.append(fast5_file)
-            else:
-                unsorted_fast5_files.append(fast5_file)
-
+    def sort_reads_2d(self, sorted_fast5_files, unsorted_fast5_files):
         moved_to_no_basecall, moved_to_pass, moved_to_fail, moved_to_nanonet = 0, 0, 0, 0
 
         # For reads not yet sorted, move them either into pass/, fail/ or no_basecall/.
