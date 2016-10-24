@@ -102,7 +102,7 @@ def get_arguments():
     try:
         args.alignment_threads
     except AttributeError:
-        args.alignment_threads = multiprocessing.cpu_count()
+        args.alignment_threads = min(multiprocessing.cpu_count(), 12)
 
     return args
 
@@ -215,7 +215,7 @@ class Sample(object):
         # Find a reference, if one exists.
         ref_dir = '/home/UNIMELB/inouye-hpc-sa/nanopore-data/references'
         ref_files = [f for f in os.listdir(ref_dir)
-                     if f.endswith('.fasta') and self.name in f]
+                     if f.endswith('.fasta') and self.name[:-3] in f]
         if ref_files:
             self.reference = os.path.join(ref_dir, ref_files[0])
         else:
@@ -299,7 +299,7 @@ class Sample(object):
                 if fastq_str:
                     try:
                         parts = fastq_str.split('\n')
-                        read_name = parts[0][1:]
+                        read_name = parts[0][1:].split()[0]
                         length = len(parts[1])
                         mean_qscore = '%.2f' % (sum([ord(c) - 33 for c in parts[3]]) / length)
                     except (IndexError, ZeroDivisionError):
@@ -324,6 +324,7 @@ class Sample(object):
         # If a reference exists, use Unicycler align to align the reads to get the identity.
         alignment_results = {}
         if self.reference:
+            print('\n\naligning reads to ' + os.path.basename(self.reference), flush=True)
             temp_sam = 'temp_' + str(random.randint(0, 100000000)) + '.sam'
             command = ['/home/UNIMELB/inouye-hpc-sa/Unicycler/unicycler_align-runner.py',
                        '--ref', self.reference, '--reads', fastq_filename, '--sam', temp_sam,
@@ -331,7 +332,8 @@ class Sample(object):
                        '--contamination', 'lambda', '--keep_bad', '--min_len', '1']
             out = subprocess.check_output(command, stderr=subprocess.STDOUT, shell=False)
             os.remove(temp_sam)
-            alignment_results = parse_unicycler_align_output(out, os.path.basename(self.reference))
+            alignment_results = parse_unicycler_align_output(out.decode(),
+                                                             os.path.basename(self.reference))
 
         # Write the table results to a text file.
         with open(info_filename, 'wt') as info:
@@ -743,7 +745,8 @@ def parse_unicycler_align_output(unicycler_out_string, reference_filename):
     read_line_re = re.compile(r'^\d+/\d+.+\(\d+ bp\)')
     unicycler_out = unicycler_out_string.split('\n')
     results = {}
-    for line in unicycler_out:
+    unicycler_out_iter = iter(unicycler_out)
+    for line in unicycler_out_iter:
         line = line.strip()
         if read_line_re.match(line):
             read_name = line.split(': ')[1].split(' (')[0]
@@ -751,7 +754,7 @@ def parse_unicycler_align_output(unicycler_out_string, reference_filename):
             alignments = []
             while True:
                 try:
-                    next_line = next(unicycler_out).strip()
+                    next_line = next(unicycler_out_iter).strip()
                     if not next_line or next_line == 'None' or next_line == 'too short to align':
                         break
                     alignments.append(next_line)
