@@ -772,13 +772,12 @@ def parse_unicycler_align_output(unicycler_out_string, reference_filename):
                 if 'lambda_phage' in alignment:
                     lambda_lengths.append(alignment_length)
             total_aligned_length = sum(lengths)
-            total_lambda_aligned_length = sum(lengths)
             reference_name = reference_filename
             if total_aligned_length / read_length < 0.5:
                 mean_identity = 0.0
             else:
                 mean_identity = weighted_average_list(identities, lengths)
-                if total_lambda_aligned_length / total_aligned_length > 0.5:
+                if sum(lambda_lengths) / total_aligned_length > 0.5:
                     reference_name = 'lambda phage'
             if mean_identity > 0.0:
                 results[read_name] = ('%.2f' % mean_identity, reference_name)
