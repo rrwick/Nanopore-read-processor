@@ -320,11 +320,12 @@ class Sample(object):
                 print('\r' + '  reads processed: ' + str(total_count).rjust(fast5_count_digits) +
                       '    reads added to FASTQ: ' + str(fastq_count).rjust(fast5_count_digits) +
                       ' ', end='', flush=True)
+        print()
 
         # If a reference exists, use Unicycler align to align the reads to get the identity.
         alignment_results = {}
         if self.reference:
-            print('\n\naligning reads to ' + os.path.basename(self.reference), flush=True)
+            print('\naligning reads to ' + os.path.basename(self.reference), flush=True)
             temp_sam = 'temp_' + str(random.randint(0, 100000000)) + '.sam'
             command = ['/home/UNIMELB/inouye-hpc-sa/Unicycler/unicycler_align-runner.py',
                        '--ref', self.reference, '--reads', fastq_filename, '--sam', temp_sam,
@@ -534,11 +535,16 @@ class Sample(object):
             print('  no reads needed to be moved')
         else:
             if moved_to_no_basecall:
-                print('  ' + str(moved_to_no_basecall) + ' reads moved to no_basecall/', flush=True)
+                print('  ' + str(moved_to_no_basecall) + ' read' +
+                      ('' if moved_to_no_basecall == 1 else 's') + ' moved to no_basecall/',
+                      flush=True)
             if moved_to_basecalled:
-                print('  ' + str(moved_to_basecalled) + ' reads moved to basecalled/', flush=True)
+                print('  ' + str(moved_to_basecalled) + ' read' +
+                      ('' if moved_to_basecalled == 1 else 's') + ' moved to basecalled/',
+                      flush=True)
             if moved_to_nanonet:
-                print('  ' + str(moved_to_nanonet) + ' reads moved to nanonet/', flush=True)
+                print('  ' + str(moved_to_nanonet) + ' read' +
+                      ('' if moved_to_nanonet == 1 else 's') + ' moved to nanonet/', flush=True)
 
     def sort_reads_2d(self, sorted_fast5_files, unsorted_fast5_files):
         moved_to_no_basecall, moved_to_pass, moved_to_fail, moved_to_nanonet = 0, 0, 0, 0
