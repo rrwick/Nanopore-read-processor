@@ -313,7 +313,7 @@ class Sample(object):
                                     length, mean_qscore])
 
                 total_count += 1
-                if fastq_str and length >= min_length:
+                if fastq_str:
                     fastq_count += 1
                     fastq.write(fastq_str)
 
@@ -339,13 +339,13 @@ class Sample(object):
                     identity, reference_name = result
                     fastq_reads[read_name].add_alignment_results(identity, reference_name)
 
-            # Now we can remove the fastq file and create a new one which removes contaminant
-            # sequences and sorts by quality.
-            os.remove(fastq_filename)
-            with gzip.open(fastq_filename, 'wt') as fastq:
-                for fastq_read in sorted(fastq_reads.values(), reverse=True):
-                    if not fastq_read.is_contamination():
-                        fastq.write(fastq_read.get_fastq_string())
+        # Now we can remove the fastq file and create a new one which removes contaminant
+        # sequences and sorts by quality.
+        os.remove(fastq_filename)
+        with gzip.open(fastq_filename, 'wt') as fastq:
+            for fastq_read in sorted(fastq_reads.values(), reverse=True):
+                if not fastq_read.is_contamination() and fastq_read.length >= min_length:
+                    fastq.write(fastq_read.get_fastq_string())
 
         # Write the table results to a text file.
         with open(info_filename, 'wt') as info:
