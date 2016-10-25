@@ -18,6 +18,7 @@ import sys
 import h5py
 import multiprocessing
 import re
+import collections
 
 
 def main():
@@ -257,6 +258,7 @@ class Sample(object):
         fastq_filename, info_filename = self.get_fastq_paths()
 
         table_lines = []
+        fastq_reads = collections.OrderedDict()
         with gzip.open(fastq_filename, 'wt') as fastq:
             total_count = 0
             fastq_count = 0
@@ -304,12 +306,15 @@ class Sample(object):
                     except (IndexError, ZeroDivisionError):
                         pass
 
-                if length > 0:
-                    length_str = str(length)
+                dict_key = read_name if read_name else read_filename
+                fastq_reads[dict_key] = FastqRead(read_filename, sample_name, library_type,
+                                                  run_name, flowcell_id, channel_number,
+                                                  basecalling, read_name, read_type, length,
+                                                  fastq_str, mean_qscore)
 
                 table_lines.append([read_filename, sample_name, library_type, run_name,
                                     flowcell_id, channel_number, basecalling, read_name, read_type,
-                                    length_str, mean_qscore])
+                                    length, mean_qscore])
 
                 total_count += 1
                 if fastq_str and length >= min_length:
@@ -322,7 +327,6 @@ class Sample(object):
         print()
 
         # If a reference exists, use Unicycler align to align the reads to get the identity.
-        alignment_results = {}
         if self.reference:
             print('\naligning reads to ' + os.path.basename(self.reference), flush=True)
             temp_sam = 'temp_' + str(random.randint(0, 100000000)) + '.sam'
@@ -334,6 +338,18 @@ class Sample(object):
             os.remove(temp_sam)
             alignment_results = parse_unicycler_align_output(out.decode(),
                                                              os.path.basename(self.reference))
+            for read_name, result in alignment_results.items():
+                if read_name in fastq_reads:
+                    identity, reference_name = result
+                    fastq_reads[read_name].add_alignment_results(identity, reference_name)
+
+            # Now we can remove the fastq file and create a new one which removes contaminant
+            # sequences and sorts by quality.
+            os.remove(fastq_filename)
+            with gzip.open(fastq_filename, 'wt') as fastq:
+                for fastq_read in sorted(fastq_reads.values()):
+                    if not fastq_read.is_contamination():
+                        fastq.write(fastq_read.get_fastq_string())
 
         # Write the table results to a text file.
         with open(info_filename, 'wt') as info:
@@ -343,16 +359,10 @@ class Sample(object):
             if self.reference:
                 header += ['Alignment identity', 'Alignment reference']
             info.write('\t'.join(header) + '\n')
-            for table_line in table_lines:
-                if self.reference:
-                    read_name = table_line[7]
-                    try:
-                        table_line += list(alignment_results[read_name])
-                    except KeyError:
-                        table_line += ['', '']
-                info.write('\t'.join(table_line))
-                info.write('\n')
 
+            for fastq_read in fastq_reads.values():
+                info.write(fastq_read.get_table_line(bool(self.reference)))
+                info.write('\n')
         print()
 
     def print_read_dirs(self):
@@ -429,10 +439,10 @@ class Sample(object):
         header = 'Already basecalled    Nanonet succeeded    Nanonet failed'
         print('  ' + bold_underline(header), flush=True)
 
-        if self.library_type == '1d':
-            nanonet_func = nanonetcall
-        elif self.library_type == '2d':
+        if self.library_type == '2d':
             nanonet_func = nanonetcall_2d
+        else:  # 1d
+            nanonet_func = nanonetcall
 
         had_fastq_count, basecall_successful, basecall_failed = 0, 0, 0
 
@@ -771,11 +781,68 @@ def parse_unicycler_align_output(unicycler_out_string, reference_filename):
                 if sum(lambda_lengths) / total_aligned_length > 0.5:
                     reference_name = 'lambda phage'
             if mean_identity > 0.0:
-                results[read_name] = ('%.2f' % mean_identity, reference_name)
+                results[read_name] = (mean_identity, reference_name)
             else:
-                results[read_name] = ('', '')
+                results[read_name] = (0.0, '')
     return results
 
+
+class FastqRead(object):
+    def __init__(self, read_filename, sample_name, library_type, run_name, flowcell_id,
+                 channel_number, basecalling, read_name, read_type, length, fastq_str,
+                 mean_qscore):
+        self.read_filename = read_filename
+        self.sample_name = sample_name
+        self.library_type = library_type
+        self.run_name = run_name
+        self.flowcell_id = flowcell_id
+        self.channel_number = channel_number
+        self.basecalling = basecalling
+        self.read_name = read_name
+        self.read_type = read_type
+        self.length = length
+        self.fastq_str = fastq_str
+        self.mean_qscore = mean_qscore
+        self.alignment_identity = 0.0
+        self.alignment_reference_name = ''
+
+    def add_alignment_results(self, identity, reference_name):
+        self.alignment_identity = identity
+        self.alignment_reference_name = reference_name
+
+    def get_table_line(self, include_alignment_columns):
+        table_line = [self.read_filename, self.sample_name, self.library_type, self.run_name,
+                      self.flowcell_id, self.channel_number, self.basecalling, self.read_name,
+                      self.read_type, str(self.length) if self.length else '',
+                      '%.2f' % self.mean_qscore if self.mean_qscore else '']
+
+        if include_alignment_columns:
+            table_line += ['%.2f' % self.alignment_identity if self.alignment_identity else '',
+                           self.alignment_reference_name]
+        return '\t'.join(table_line)
+
+    def get_fastq_string(self):
+        if self.alignment_identity and self.alignment_reference_name:
+            parts = self.fastq_str.split('\n')
+            name_line = parts[0] + ' alignment reference=' + self.alignment_reference_name + \
+                ' alignment identity=' + '%.2f' % self.alignment_identity + '%'
+            return '\n'.join([name_line, parts[1], parts[2], parts[3], ''])
+        else:
+            return self.fastq_str
+
+    def comparison_tuple(self):
+        return (self.alignment_identity if self.alignment_identity else 0.0, self.mean_qscore,
+                self.length)
+
+    def __lt__(self, other):
+        return self.comparison_tuple() < other.comparison_tuple()
+
+    def is_contamination(self):
+        if not self.alignment_reference_name:
+            return False
+        if 'lambda' in self.sample_name:
+            return False
+        return 'lambda_phage' in self.alignment_reference_name
 
 if __name__ == '__main__':
     main()
