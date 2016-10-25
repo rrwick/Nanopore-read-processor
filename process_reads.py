@@ -19,6 +19,7 @@ import h5py
 import multiprocessing
 import re
 import collections
+import shutil
 
 
 def main():
@@ -70,14 +71,17 @@ def main():
 
 
 def get_arguments():
-    parser = argparse.ArgumentParser(description='Nanopore read processor for Happyfeet')
-    parser.add_argument('commands', nargs='+',
+    parser = argparse.ArgumentParser(description='Nanopore read processor for Happyfeet',
+                                     formatter_class=MyHelpFormatter)
+    parser.add_argument('--commands', nargs='+', required=True, type=str,
                         choices=['list', 'sort', 'basecall', 'fastq', 'tarball', 'all'],
-                        help='One or more commands for this tool: list=just display simple info '
-                             'about the read set, sort=move reads into directories based on their '
-                             'basecall content, basecall=run nanonet on reads without base info, '
-                             'fastq=produce FASTQ files, tarball=bundle up FAST5 files in tar.gz '
-                             'files, all=all of the above')
+                        help='W|One or more commands for this tool:\n'
+                             '  list      just display simple info about the read set\n'
+                             '  sort      move reads into directories with their basecall content\n'
+                             '  basecall  run nanonet on reads without base info\n'
+                             '  fastq     produce FASTQ files\n'
+                             '  tarball   bundle up FAST5 files in tar.gz files\n'
+                             '  all       all of the above')
     parser.add_argument('--samples', nargs='+', required=True, type=str,
                         help='Which samples to process - can be a partial name match or "all" to '
                              'process all samples')
@@ -843,6 +847,50 @@ class FastqRead(object):
         if 'lambda' in self.sample_name:
             return False
         return 'lambda_phage' in self.alignment_reference_name
+
+
+class MyHelpFormatter(argparse.RawDescriptionHelpFormatter):
+    """
+    This is a custom formatter class for argparse. It allows for some custom formatting,
+    in particular for the help texts with multiple options (like bridging mode and verbosity level).
+    http://stackoverflow.com/questions/3853722
+    """
+    def __init__(self, prog):
+        terminal_width = shutil.get_terminal_size().columns
+        os.environ['COLUMNS'] = str(terminal_width)
+        max_help_position = min(max(24, terminal_width // 3), 40)
+        super().__init__(prog, max_help_position=max_help_position)
+
+    def _split_lines(self, text, width):
+        if text.startswith('W|'):
+            text_lines = text[2:].splitlines()
+            wrapped_text_lines = []
+            for line in text_lines:
+                if len(line) <= width:
+                    wrapped_text_lines.append(line)
+                else:
+                    wrap_column = 2
+                    line_parts = line.split()
+                    wrap_column += line.rfind('  ')
+                    join = ''
+                    current_line = '  ' + line_parts[0]
+                    current_line = current_line.ljust(wrap_column)
+                    for part in line_parts[1:]:
+                        if len(current_line) + len(join) + 1 + len(part) <= width:
+                            current_line += join + ' ' + part
+                        else:
+                            wrapped_text_lines.append(current_line + join)
+                            current_line = ' ' * wrap_column + part
+                    wrapped_text_lines.append(current_line)
+            return wrapped_text_lines
+        else:
+            return argparse.HelpFormatter._split_lines(self, text, width)
+
+    def _fill_text(self, text, width, indent):
+        if text.startswith('R|'):
+            return argparse.RawDescriptionHelpFormatter._fill_text(self, text[2:], width, indent)
+        else:
+            return argparse.HelpFormatter._fill_text(self, text, width, indent)
 
 if __name__ == '__main__':
     main()
