@@ -266,8 +266,8 @@ class Sample(object):
                 library_type = self.name[-2:]
 
                 run_name, flowcell_id, channel_number, basecalling, read_name, read_type, \
-                    length_str, mean_qscore, fastq_str = '', '', '', '', '', '', '', '', ''
-                length = 0
+                    fastq_str = '', '', '', '', '', '', ''
+                length, mean_qscore = 0, 0.0
 
                 try:
                     hdf5_file = h5py.File(fast5_file, 'r')
@@ -298,7 +298,7 @@ class Sample(object):
                         parts = fastq_str.split('\n')
                         read_name = parts[0][1:].split()[0]
                         length = len(parts[1])
-                        mean_qscore = '%.2f' % (sum([ord(c) - 33 for c in parts[3]]) / length)
+                        mean_qscore = sum([ord(c) - 33 for c in parts[3]]) / length
                     except (IndexError, ZeroDivisionError):
                         pass
 
@@ -343,7 +343,7 @@ class Sample(object):
             # sequences and sorts by quality.
             os.remove(fastq_filename)
             with gzip.open(fastq_filename, 'wt') as fastq:
-                for fastq_read in sorted(fastq_reads.values()):
+                for fastq_read in sorted(fastq_reads.values(), reverse=True):
                     if not fastq_read.is_contamination():
                         fastq.write(fastq_read.get_fastq_string())
 
@@ -775,7 +775,7 @@ def parse_unicycler_align_output(unicycler_out_string, reference_filename):
             else:
                 mean_identity = weighted_average_list(identities, lengths)
                 if sum(lambda_lengths) / total_aligned_length > 0.5:
-                    reference_name = 'lambda phage'
+                    reference_name = 'lambda_phage'
             if mean_identity > 0.0:
                 results[read_name] = (mean_identity, reference_name)
             else:
@@ -820,8 +820,8 @@ class FastqRead(object):
     def get_fastq_string(self):
         if self.alignment_identity and self.alignment_reference_name:
             parts = self.fastq_str.split('\n')
-            name_line = parts[0] + ' alignment reference=' + self.alignment_reference_name + \
-                ' alignment identity=' + '%.2f' % self.alignment_identity + '%'
+            name_line = parts[0] + ' reference=' + self.alignment_reference_name + \
+                ' identity=' + '%.2f' % self.alignment_identity + '%'
             return '\n'.join([name_line, parts[1], parts[2], parts[3], ''])
         else:
             return self.fastq_str
