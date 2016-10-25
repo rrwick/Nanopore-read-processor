@@ -16,7 +16,6 @@ import random
 import subprocess
 import sys
 import h5py
-from multiprocessing.dummy import Pool as ThreadPool
 import multiprocessing
 import re
 
@@ -422,8 +421,8 @@ class Sample(object):
 
         # Bring the fast5 files in the /no_basecall/ directory to the front of the list,
         # as they are the ones which actually need the basecalling.
-        all_fast5s_no_basecall_first = [x for x in self.all_fast5_files if 'no_basecall' in x] + \
-                                       [x for x in self.all_fast5_files if 'no_basecall' not in x]
+        all_fast5s = [x for x in self.all_fast5_files if 'no_basecall' in x] + \
+                     [x for x in self.all_fast5_files if 'no_basecall' not in x]
 
         prog_name = 'nanonetcall' if self.library_type == '1d' else 'nanonet2d'
         print('\nrunning ' + prog_name + ' on any', self.name, 'reads lacking base calls...')
@@ -431,16 +430,15 @@ class Sample(object):
         print('  ' + bold_underline(header), flush=True)
 
         if self.library_type == '1d':
-            self.basecall_where_necessary_1d(all_fast5s_no_basecall_first, threads)
+            nanonet_func = nanonetcall
         elif self.library_type == '2d':
-            self.basecall_where_necessary_2d(all_fast5s_no_basecall_first, threads)
-        print('')
+            nanonet_func = nanonetcall_2d
 
-    def basecall_where_necessary_1d(self, all_fast5s, threads):
         had_fastq_count, basecall_successful, basecall_failed = 0, 0, 0
 
-        pool = ThreadPool(threads)
-        for result, fast5_file in pool.imap_unordered(nanonetcall, all_fast5s):
+        for fast5_file in all_fast5s:
+            result = nanonet_func(fast5_file, threads)
+
             if result == 'had_call':
                 had_fastq_count += 1
                 if '/no_basecall/' in fast5_file:
@@ -452,28 +450,11 @@ class Sample(object):
                 basecall_failed += 1
                 if '/nanonet/' in fast5_file:
                     self.move_read_to_no_basecall(fast5_file)
-            print('\r' + '  ' + str(had_fastq_count).rjust(18) +
-                  green(str(basecall_successful).rjust(21)) +
-                  red(str(basecall_failed).rjust(18)) + ' ', end='', flush=True)
 
-    def basecall_where_necessary_2d(self, all_fast5s, threads):
-        had_fastq_count, basecall_successful, basecall_failed = 0, 0, 0
-        pool = ThreadPool(threads)
-        for result, fast5_file in pool.imap_unordered(nanonetcall_2d, all_fast5s):
-            if result == 'had_call':
-                had_fastq_count += 1
-                if '/no_basecall/' in fast5_file:
-                    self.move_read_to_nanonet(fast5_file)
-            elif result == 'success':
-                basecall_successful += 1
-                self.move_read_to_nanonet(fast5_file)
-            else:  # failed to basecall
-                basecall_failed += 1
-                if '/nanonet/' in fast5_file:
-                    self.move_read_to_no_basecall(fast5_file)
             print('\r' + '  ' + str(had_fastq_count).rjust(18) +
                   green(str(basecall_successful).rjust(21)) +
                   red(str(basecall_failed).rjust(18)) + ' ', end='', flush=True)
+        print()
 
     def sort_reads(self):
         print('\nsorting reads into proper directories...', flush=True)
@@ -621,47 +602,51 @@ def move_file(source_file, target_dir):
     os.rename(source_file, dest_file)
 
 
-def nanonetcall(fast5_file):
+def nanonetcall(fast5_file, threads):
     try:
         if has_template_basecall(fast5_file):
-            return 'had_call', fast5_file
+            return 'had_call'
         else:
-            nanonetcall_cmd = ['nanonetcall', '--fastq', '--write_events', fast5_file,
-                               '--jobs', '1']
+            nanonetcall_cmd = ['nanonetcall', '--fastq', '--write_events',
+                               '--jobs', str(threads), fast5_file]
             try:
                 subprocess.check_output(nanonetcall_cmd, stderr=subprocess.STDOUT)
             except subprocess.CalledProcessError:
                 pass
             if has_template_basecall(fast5_file):
-                return 'success', fast5_file
+                return 'success'
             else:
-                return 'failed', fast5_file
+                return 'failed'
     except IOError:
-        return 'failed', fast5_file
+        return 'failed'
 
 
-def nanonetcall_2d(fast5_file):
+def nanonetcall_2d(fast5_file, threads):
+    if has_template_basecall(fast5_file) or has_complement_basecall(fast5_file) or \
+            has_2d_basecall(fast5_file):
+        return 'had_call'
+
+    temp_prefix = 'temp_' + str(random.randint(0, 100000000))
     try:
+        nanonetcall_cmd = ['nanonet2d', '--fastq', '--write_events',
+                           '--jobs', str(threads), fast5_file, temp_prefix]
+        try:
+            subprocess.check_output(nanonetcall_cmd, stderr=subprocess.STDOUT)
+        except subprocess.CalledProcessError:
+            pass
+        remove_if_exists(temp_prefix + '_template.fastq')
+        remove_if_exists(temp_prefix + '_complement.fastq')
+        remove_if_exists(temp_prefix + '_2d.fastq')
         if has_template_basecall(fast5_file) or has_complement_basecall(fast5_file) or \
                 has_2d_basecall(fast5_file):
-            return 'had_call', fast5_file
+            return 'success'
         else:
-            temp_prefix = 'temp_' + str(random.randint(0, 100000000))
-            nanonetcall_cmd = ['nanonet2d', '--fastq', '--write_events', fast5_file, temp_prefix]
-            try:
-                subprocess.check_output(nanonetcall_cmd, stderr=subprocess.STDOUT)
-            except subprocess.CalledProcessError:
-                pass
-            remove_if_exists(temp_prefix + '_template.fastq')
-            remove_if_exists(temp_prefix + '_complement.fastq')
-            remove_if_exists(temp_prefix + '_2d.fastq')
-            if has_template_basecall(fast5_file) or has_complement_basecall(fast5_file) or \
-                    has_2d_basecall(fast5_file):
-                return 'success', fast5_file
-            else:
-                return 'failed', fast5_file
+            return 'failed'
     except IOError:
-        return 'failed', fast5_file
+        remove_if_exists(temp_prefix + '_template.fastq')
+        remove_if_exists(temp_prefix + '_complement.fastq')
+        remove_if_exists(temp_prefix + '_2d.fastq')
+        return 'failed'
 
 
 def bold_underline(text):
