@@ -60,21 +60,24 @@ def main():
     for sample_name in samples_to_process:
         sample = samples[sample_name]
         sample.print_header()
-        if 'sort' in args.commands:
+        if 'sort' in args.command:
             sample.sort_reads()
-        if 'basecall' in args.commands:
+        if 'basecall' in args.command:
             sample.basecall_where_necessary(args.nanonet_threads)
-        if 'fastq' in args.commands:
+        if 'fastq' in args.command:
             sample.extract_fastq(args.min_fastq_length, args.alignment_threads)
-        if 'tarball' in args.commands:
+        if 'tarball' in args.command:
             sample.gzip_fast5s()
 
 
 def get_arguments():
+
+    default_nanonet_threads = min(multiprocessing.cpu_count(), 8)
+    default_alignment_threads = min(multiprocessing.cpu_count(), 12)
+
     parser = argparse.ArgumentParser(description='Nanopore read processor for Happyfeet',
                                      formatter_class=MyHelpFormatter)
-    parser.add_argument('--commands', nargs='+', required=True, type=str,
-                        choices=['list', 'sort', 'basecall', 'fastq', 'tarball', 'all'],
+    parser.add_argument('--command', nargs='+', required=True, type=str, default=argparse.SUPPRESS,
                         help='W|One or more commands for this tool:\n'
                              '  list      just display simple info about the read set\n'
                              '  sort      move reads into directories with their basecall content\n'
@@ -82,12 +85,12 @@ def get_arguments():
                              '  fastq     produce FASTQ files\n'
                              '  tarball   bundle up FAST5 files in tar.gz files\n'
                              '  all       all of the above')
-    parser.add_argument('--samples', nargs='+', required=True, type=str,
+    parser.add_argument('--samples', nargs='+', required=True, type=str, default=argparse.SUPPRESS,
                         help='Which samples to process - can be a partial name match or "all" to '
                              'process all samples')
-    parser.add_argument('--nanonet_threads', type=int, default=argparse.SUPPRESS,
+    parser.add_argument('--nanonet_threads', type=int, default=default_nanonet_threads,
                         help='The number of threads to use for nanonet')
-    parser.add_argument('--alignment_threads', type=int, default=argparse.SUPPRESS,
+    parser.add_argument('--alignment_threads', type=int, default=default_alignment_threads,
                         help='The number of threads to use for aligning reads')
     parser.add_argument('--min_fastq_length', type=int, default=100,
                         help='Reads shorter than this length (in bp) will not be included in the '
@@ -95,25 +98,14 @@ def get_arguments():
 
     args = parser.parse_args()
 
-    if 'all' in args.commands:
-        args.commands = ['sort', 'basecall', 'fastq', 'tarball']
+    valid_commands = ['list', 'sort', 'basecall', 'fastq', 'tarball', 'all']
+    if any(x not in valid_commands for x in args.command):
+        parser.error('command(s) must be one of the following: ' + ', '.join(valid_commands))
 
-    try:
-        args.nanonet_threads
-    except AttributeError:
-        args.nanonet_threads = min(multiprocessing.cpu_count(), 8)
-
-    try:
-        args.alignment_threads
-    except AttributeError:
-        args.alignment_threads = min(multiprocessing.cpu_count(), 12)
+    if 'all' in args.command:
+        args.command = ['sort', 'basecall', 'fastq', 'tarball']
 
     return args
-
-
-def quit_with_error(message):
-    print('Error:', message, file=sys.stderr)
-    sys.exit(1)
 
 
 def get_most_recent_fast5_mod_date(directories):
@@ -849,7 +841,7 @@ class FastqRead(object):
         return 'lambda_phage' in self.alignment_reference_name
 
 
-class MyHelpFormatter(argparse.RawDescriptionHelpFormatter):
+class MyHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
     """
     This is a custom formatter class for argparse. It allows for some custom formatting,
     in particular for the help texts with multiple options (like bridging mode and verbosity level).
@@ -874,7 +866,7 @@ class MyHelpFormatter(argparse.RawDescriptionHelpFormatter):
                     wrap_column += line.rfind('  ')
                     join = ''
                     current_line = '  ' + line_parts[0]
-                    current_line = current_line.ljust(wrap_column)
+                    current_line = current_line.ljust(wrap_column - 1)
                     for part in line_parts[1:]:
                         if len(current_line) + len(join) + 1 + len(part) <= width:
                             current_line += join + ' ' + part
@@ -884,13 +876,7 @@ class MyHelpFormatter(argparse.RawDescriptionHelpFormatter):
                     wrapped_text_lines.append(current_line)
             return wrapped_text_lines
         else:
-            return argparse.HelpFormatter._split_lines(self, text, width)
-
-    def _fill_text(self, text, width, indent):
-        if text.startswith('R|'):
-            return argparse.RawDescriptionHelpFormatter._fill_text(self, text[2:], width, indent)
-        else:
-            return argparse.HelpFormatter._fill_text(self, text, width, indent)
+            return argparse.ArgumentDefaultsHelpFormatter._split_lines(self, text, width)
 
 if __name__ == '__main__':
     main()
