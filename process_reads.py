@@ -14,7 +14,6 @@ import gzip
 import os
 import random
 import subprocess
-import sys
 import h5py
 import multiprocessing
 import re
@@ -72,8 +71,8 @@ def main():
 
 def get_arguments():
 
-    default_nanonet_threads = min(multiprocessing.cpu_count(), 8)
-    default_alignment_threads = min(multiprocessing.cpu_count(), 12)
+    default_nanonet_threads = multiprocessing.cpu_count()
+    default_alignment_threads = min(multiprocessing.cpu_count(), 40)
 
     parser = argparse.ArgumentParser(description='Nanopore read processor for Happyfeet',
                                      formatter_class=MyHelpFormatter)
@@ -252,6 +251,7 @@ class Sample(object):
 
         print('\nextracting FASTQs from reads...', flush=True)
         fastq_filename, info_filename = self.get_fastq_paths()
+        fasta_filename = fastq_filename.replace('.fastq.gz', '.fasta')
 
         table_lines = []
         fastq_reads = collections.OrderedDict()
@@ -307,11 +307,9 @@ class Sample(object):
                                                   run_name, flowcell_id, channel_number,
                                                   basecalling, read_name, read_type, length,
                                                   fastq_str, mean_qscore)
-
                 table_lines.append([read_filename, sample_name, library_type, run_name,
                                     flowcell_id, channel_number, basecalling, read_name, read_type,
                                     length, mean_qscore])
-
                 total_count += 1
                 if fastq_str:
                     fastq_count += 1
@@ -342,12 +340,27 @@ class Sample(object):
         # Now we can remove the fastq file and create a new one which removes contaminant
         # sequences and sorts by quality.
         os.remove(fastq_filename)
-        with gzip.open(fastq_filename, 'wt') as fastq:
+        lengths, identities, identity_lengths = [], [], []
+        with gzip.open(fastq_filename, 'wt') as fastq, open(fasta_filename, 'wt') as fasta:
             for fastq_read in sorted(fastq_reads.values(), reverse=True):
                 if not fastq_read.is_contamination() and fastq_read.length >= min_length:
                     fastq.write(fastq_read.get_fastq_string())
+                    fasta.write(fastq_read.get_fasta_string())
+                    fastq_count += 1
+                    lengths.append(fastq_read.length)
+                    if fastq_read.alignment_identity > 0:
+                        identities.append(fastq_read.alignment_identity)
+                        identity_lengths.append(fastq_read.length)
+        print('  reads in filtered FASTQ: ' + str(len(lengths)))
+        if lengths:
+            print('  mean read length:        ' + '%.1f' % (sum(lengths) / len(lengths)))
+        if identities:
+            print('  percent aligned:         ' +
+                  '%.1f' % (100.0 * len(identity_lengths) / len(lengths)) + '%')
+            print('  mean identity:           ' +
+                  '%.1f' % (weighted_average_list(identities, identity_lengths)) + '%')
 
-        # Write the table results to a text file.
+        # Write the results table to a text file.
         with open(info_filename, 'wt') as info:
             header = ['Filename', 'Sample name', 'Library type', 'Run name', 'Flowcell ID',
                       'Channel number', 'Basecalling', 'Read name', 'Read type', 'Length',
@@ -423,44 +436,53 @@ class Sample(object):
         tar.wait()
         os.chdir(current_dir)
 
-    def basecall_where_necessary(self, threads):
+    def read_has_basecall(self, fast5_file):
+        if self.library_type == '2d':
+            return get_mean_template_qscore(fast5_file) > 0.0 or \
+                   get_mean_complement_qscore(fast5_file) or get_mean_2d_qscore(fast5_file)
+        else:  # 1d
+            return get_mean_template_qscore(fast5_file) > 0.0
 
-        # Bring the fast5 files in the /no_basecall/ directory to the front of the list,
-        # as they are the ones which actually need the basecalling.
-        all_fast5s = [x for x in self.all_fast5_files if 'no_basecall' in x] + \
-                     [x for x in self.all_fast5_files if 'no_basecall' not in x]
+    def basecall_where_necessary(self, threads):
+        # Check to make sure there is a /no_basecall directory for this sample and that it's not
+        # empty.
+        no_basecall_dir = [x for x in self.all_dirs if '/no_basecall' in x]
+        if not no_basecall_dir:
+            return
+        no_basecall_dir = no_basecall_dir[0]
+        try:
+            os.rmdir(no_basecall_dir)
+        except OSError:
+            pass
+        if not no_basecall_dir:
+            return
+
+        no_basecall_reads = [f for f in os.listdir(no_basecall_dir) if f.endswith('.fast5')]
+        for fast5_file in no_basecall_reads:
+            if self.read_has_basecall(fast5_file):
+                self.move_read_to_nanonet(fast5_file)
+
+        no_basecall_reads = [f for f in os.listdir(no_basecall_dir) if f.endswith('.fast5')]
+        no_basecall_count = len(no_basecall_reads)
 
         prog_name = 'nanonetcall' if self.library_type == '1d' else 'nanonet2d'
-        print('\nrunning ' + prog_name + ' on any', self.name, 'reads lacking base calls...')
-        header = 'Already basecalled    Nanonet succeeded    Nanonet failed'
-        print('  ' + bold_underline(header), flush=True)
+        print('\nrunning ' + prog_name + ' on', no_basecall_count, 'reads in',
+              no_basecall_dir, flush=True)
 
         if self.library_type == '2d':
-            nanonet_func = nanonetcall_2d
+            nanonetcall_2d(no_basecall_dir, threads)
         else:  # 1d
-            nanonet_func = nanonetcall
+            nanonetcall(no_basecall_dir, threads)
 
-        had_fastq_count, basecall_successful, basecall_failed = 0, 0, 0
-
-        for fast5_file in all_fast5s:
-            result = nanonet_func(fast5_file, threads)
-
-            if result == 'had_call':
-                had_fastq_count += 1
-                if '/no_basecall/' in fast5_file:
-                    self.move_read_to_nanonet(fast5_file)
-            elif result == 'success':
+        basecall_successful, basecall_failed = 0, 0
+        for fast5_file in no_basecall_reads:
+            if self.read_has_basecall(fast5_file):
                 basecall_successful += 1
                 self.move_read_to_nanonet(fast5_file)
-            else:  # failed to basecall
+            else:
                 basecall_failed += 1
-                if '/nanonet/' in fast5_file:
-                    self.move_read_to_no_basecall(fast5_file)
-
-            print('\r' + '  ' + str(had_fastq_count).rjust(18) +
-                  green(str(basecall_successful).rjust(21)) +
-                  red(str(basecall_failed).rjust(18)) + ' ', end='', flush=True)
-        print()
+        print('Successfully basecalled:', basecall_successful)
+        print('Basecalling failed:     ', basecall_failed)
 
     def sort_reads(self):
         print('\nsorting reads into proper directories...', flush=True)
@@ -499,24 +521,32 @@ class Sample(object):
         moved_to_no_basecall, moved_to_basecalled, moved_to_nanonet = 0, 0, 0
 
         # For reads not yet sorted, move them either into basecalled/ or no_basecall/.
-        for fast5_file in unsorted_fast5_files:
-            mean_template_qscore = get_mean_template_qscore(fast5_file)
-            if mean_template_qscore == 0.0:
-                moved_to_no_basecall += 1
-                self.move_read_to_no_basecall(fast5_file)
-            else:  # mean_template_qscore > 0.0
-                moved_to_basecalled += 1
-                self.move_read_to_basecalled(fast5_file)
+        if unsorted_fast5_files:
+            count_str = str(len(unsorted_fast5_files)) + ' '
+            for i, fast5_file in enumerate(unsorted_fast5_files):
+                print('\r  checking file ' + str(i+1) + ' / ' + count_str, flush=True, end='')
+                mean_template_qscore = get_mean_template_qscore(fast5_file)
+                if mean_template_qscore == 0.0:
+                    moved_to_no_basecall += 1
+                    self.move_read_to_no_basecall(fast5_file)
+                else:  # mean_template_qscore > 0.0
+                    moved_to_basecalled += 1
+                    self.move_read_to_basecalled(fast5_file)
+            print('  done!', flush=True)
 
         # For reads already sorted, only move them if there's a discrepancy.
-        for fast5_file in sorted_fast5_files:
-            mean_template_qscore = get_mean_template_qscore(fast5_file)
-            if mean_template_qscore == 0.0 and '/no_basecall/' not in fast5_file:
-                moved_to_no_basecall += 1
-                self.move_read_to_no_basecall(fast5_file)
-            elif mean_template_qscore > 0.0 and '/no_basecall/' in fast5_file:
-                moved_to_nanonet += 1
-                self.move_read_to_nanonet(fast5_file)
+        if sorted_fast5_files:
+            count_str = str(len(sorted_fast5_files)) + ' '
+            for i, fast5_file in enumerate(sorted_fast5_files):
+                print('\r  checking file ' + str(i+1) + ' / ' + count_str, flush=True, end='')
+                mean_template_qscore = get_mean_template_qscore(fast5_file)
+                if mean_template_qscore == 0.0 and '/no_basecall/' not in fast5_file:
+                    moved_to_no_basecall += 1
+                    self.move_read_to_no_basecall(fast5_file)
+                elif mean_template_qscore > 0.0 and '/no_basecall/' in fast5_file:
+                    moved_to_nanonet += 1
+                    self.move_read_to_nanonet(fast5_file)
+            print('  done!', flush=True)
 
         if not moved_to_no_basecall and not moved_to_basecalled and not moved_to_nanonet:
             print('  no reads needed to be moved')
@@ -608,51 +638,32 @@ def move_file(source_file, target_dir):
     os.rename(source_file, dest_file)
 
 
-def nanonetcall(fast5_file, threads):
+def nanonetcall(directory, threads):
+    temp_fastq = 'temp_' + str(random.randint(0, 100000000)) + '.fastq'
+    nanonetcall_cmd = ['nanonetcall', '--fastq', '--write_events', '--jobs', str(threads),
+                       directory]
     try:
-        if has_template_basecall(fast5_file):
-            return 'had_call'
-        else:
-            nanonetcall_cmd = ['nanonetcall', '--fastq', '--write_events',
-                               '--jobs', str(threads), fast5_file]
-            try:
-                subprocess.check_output(nanonetcall_cmd, stderr=subprocess.STDOUT)
-            except subprocess.CalledProcessError:
-                pass
-            if has_template_basecall(fast5_file):
-                return 'success'
-            else:
-                return 'failed'
-    except IOError:
-        return 'failed'
+        with open(temp_fastq, 'wb') as fastq_out:
+            p = subprocess.Popen(nanonetcall_cmd, stdout=fastq_out)
+            _, _ = p.communicate()
+            p.wait()
+    except subprocess.CalledProcessError:
+        pass
+    remove_if_exists(temp_fastq)
 
 
-def nanonetcall_2d(fast5_file, threads):
-    if has_template_basecall(fast5_file) or has_complement_basecall(fast5_file) or \
-            has_2d_basecall(fast5_file):
-        return 'had_call'
-
+def nanonetcall_2d(directory, threads):
     temp_prefix = 'temp_' + str(random.randint(0, 100000000))
+    nanonet2d_cmd = ['nanonet2d', '--fastq', '--write_events', '--jobs', str(threads), directory]
     try:
-        nanonetcall_cmd = ['nanonet2d', '--fastq', '--write_events',
-                           '--jobs', str(threads), fast5_file, temp_prefix]
-        try:
-            subprocess.check_output(nanonetcall_cmd, stderr=subprocess.STDOUT)
-        except subprocess.CalledProcessError:
-            pass
-        remove_if_exists(temp_prefix + '_template.fastq')
-        remove_if_exists(temp_prefix + '_complement.fastq')
-        remove_if_exists(temp_prefix + '_2d.fastq')
-        if has_template_basecall(fast5_file) or has_complement_basecall(fast5_file) or \
-                has_2d_basecall(fast5_file):
-            return 'success'
-        else:
-            return 'failed'
-    except IOError:
-        remove_if_exists(temp_prefix + '_template.fastq')
-        remove_if_exists(temp_prefix + '_complement.fastq')
-        remove_if_exists(temp_prefix + '_2d.fastq')
-        return 'failed'
+        p = subprocess.Popen(nanonet2d_cmd)
+        _, _ = p.communicate()
+        p.wait()
+    except subprocess.CalledProcessError:
+        pass
+    remove_if_exists(temp_prefix + '_template.fastq')
+    remove_if_exists(temp_prefix + '_complement.fastq')
+    remove_if_exists(temp_prefix + '_2d.fastq')
 
 
 def bold_underline(text):
@@ -825,6 +836,10 @@ class FastqRead(object):
             return '\n'.join([name_line, parts[1], parts[2], parts[3], ''])
         else:
             return self.fastq_str
+
+    def get_fasta_string(self):
+        parts = self.get_fastq_string().split('\n')
+        return '\n'.join(['>' + parts[0][1:], parts[1], ''])
 
     def comparison_tuple(self):
         return (self.alignment_identity if self.alignment_identity else 0.0, self.mean_qscore,
