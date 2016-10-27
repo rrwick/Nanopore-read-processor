@@ -19,6 +19,7 @@ import multiprocessing
 import re
 import collections
 import shutil
+import zlib
 
 
 def main():
@@ -64,7 +65,8 @@ def main():
         if 'basecall' in args.command:
             sample.basecall_where_necessary(args.nanonet_threads)
         if 'fastq' in args.command:
-            sample.extract_fastq(args.min_fastq_length, args.alignment_threads)
+            sample.extract_fastq(args.min_fastq_length, args.min_compression_ratio,
+                                 args.alignment_threads)
         if 'tarball' in args.command:
             sample.gzip_fast5s()
 
@@ -94,6 +96,10 @@ def get_arguments():
     parser.add_argument('--min_fastq_length', type=int, default=100,
                         help='Reads shorter than this length (in bp) will not be included in the '
                              'FASTQ files')
+    parser.add_argument('--min_compression_ratio', type=float, default=0.05,
+                        help='Reads with a sequence that have a zlib compression ratio of less '
+                             'than this value are assumed to be repetitive nonsense and are not '
+                             'included in the FASTQ files')
 
     args = parser.parse_args()
 
@@ -245,7 +251,7 @@ class Sample(object):
         print('\n\n' + bold_yellow_underline(self.name))
         self.print_read_dirs()
 
-    def extract_fastq(self, min_length, threads):
+    def extract_fastq(self, min_length, min_compression_ratio, threads):
         if not self.all_dirs:
             return
 
@@ -253,7 +259,6 @@ class Sample(object):
         fastq_filename, info_filename = self.get_fastq_paths()
         fasta_filename = fastq_filename.replace('.fastq.gz', '.fasta')
 
-        table_lines = []
         fastq_reads = collections.OrderedDict()
         with gzip.open(fastq_filename, 'wt') as fastq:
             total_count = 0
@@ -300,16 +305,13 @@ class Sample(object):
                         length = len(parts[1])
                         mean_qscore = sum([ord(c) - 33 for c in parts[3]]) / length
                     except (IndexError, ZeroDivisionError):
-                        pass
+                        fastq_str = ''
 
                 dict_key = read_name if read_name else read_filename
                 fastq_reads[dict_key] = FastqRead(read_filename, sample_name, library_type,
                                                   run_name, flowcell_id, channel_number,
                                                   basecalling, read_name, read_type, length,
                                                   fastq_str, mean_qscore)
-                table_lines.append([read_filename, sample_name, library_type, run_name,
-                                    flowcell_id, channel_number, basecalling, read_name, read_type,
-                                    length, mean_qscore])
                 total_count += 1
                 if fastq_str:
                     fastq_count += 1
@@ -343,7 +345,8 @@ class Sample(object):
         lengths, identities, identity_lengths = [], [], []
         with gzip.open(fastq_filename, 'wt') as fastq, open(fasta_filename, 'wt') as fasta:
             for fastq_read in sorted(fastq_reads.values(), reverse=True):
-                if not fastq_read.is_contamination() and fastq_read.length >= min_length:
+                if not fastq_read.is_contamination() and fastq_read.length >= min_length and \
+                        fastq_read.compression_ratio >= min_compression_ratio:
                     fastq.write(fastq_read.get_fastq_string())
                     fasta.write(fastq_read.get_fasta_string())
                     fastq_count += 1
@@ -364,7 +367,7 @@ class Sample(object):
         with open(info_filename, 'wt') as info:
             header = ['Filename', 'Sample name', 'Library type', 'Run name', 'Flowcell ID',
                       'Channel number', 'Basecalling', 'Read name', 'Read type', 'Length',
-                      'Mean qscore']
+                      'Mean qscore', 'zlib compression ratio']
             if self.reference:
                 header += ['Alignment identity', 'Alignment reference']
             info.write('\t'.join(header) + '\n')
@@ -457,12 +460,14 @@ class Sample(object):
         if not no_basecall_dir:
             return
 
-        no_basecall_reads = [f for f in os.listdir(no_basecall_dir) if f.endswith('.fast5')]
+        no_basecall_reads = [os.path.join(no_basecall_dir, f) for f in os.listdir(no_basecall_dir)
+                             if f.endswith('.fast5')]
         for fast5_file in no_basecall_reads:
             if self.read_has_basecall(fast5_file):
                 self.move_read_to_nanonet(fast5_file)
 
-        no_basecall_reads = [f for f in os.listdir(no_basecall_dir) if f.endswith('.fast5')]
+        no_basecall_reads = [os.path.join(no_basecall_dir, f) for f in os.listdir(no_basecall_dir)
+                             if f.endswith('.fast5')]
         no_basecall_count = len(no_basecall_reads)
 
         prog_name = 'nanonetcall' if self.library_type == '1d' else 'nanonet2d'
@@ -483,6 +488,11 @@ class Sample(object):
                 basecall_failed += 1
         print('Successfully basecalled:', basecall_successful)
         print('Basecalling failed:     ', basecall_failed)
+
+        try:
+            os.rmdir(no_basecall_dir)
+        except OSError:
+            pass
 
     def sort_reads(self):
         print('\nsorting reads into proper directories...', flush=True)
@@ -641,12 +651,10 @@ def move_file(source_file, target_dir):
 def nanonetcall(directory, threads):
     temp_fastq = 'temp_' + str(random.randint(0, 100000000)) + '.fastq'
     nanonetcall_cmd = ['nanonetcall', '--fastq', '--write_events', '--jobs', str(threads),
-                       directory]
+                       '--max_len', '100000', directory]
     try:
         with open(temp_fastq, 'wb') as fastq_out:
-            p = subprocess.Popen(nanonetcall_cmd, stdout=fastq_out)
-            _, _ = p.communicate()
-            p.wait()
+            subprocess.check_call(nanonetcall_cmd, stdout=fastq_out)
     except subprocess.CalledProcessError:
         pass
     remove_if_exists(temp_fastq)
@@ -654,11 +662,10 @@ def nanonetcall(directory, threads):
 
 def nanonetcall_2d(directory, threads):
     temp_prefix = 'temp_' + str(random.randint(0, 100000000))
-    nanonet2d_cmd = ['nanonet2d', '--fastq', '--write_events', '--jobs', str(threads), directory]
+    nanonet2d_cmd = ['nanonet2d', '--fastq', '--write_events', '--jobs', str(threads),
+                     '--max_len', '100000', directory, temp_prefix]
     try:
-        p = subprocess.Popen(nanonet2d_cmd)
-        _, _ = p.communicate()
-        p.wait()
+        subprocess.check_call(nanonet2d_cmd)
     except subprocess.CalledProcessError:
         pass
     remove_if_exists(temp_prefix + '_template.fastq')
@@ -680,6 +687,10 @@ def green(text):
 
 def red(text):
     return '\033[31m' + text + '\033[0m'
+
+
+def dim(text):
+    return '\033[2m' + text + '\033[0m'
 
 
 def get_best_fastq_hdf5_location(hdf5_file, names):
@@ -808,10 +819,14 @@ class FastqRead(object):
         self.read_name = read_name
         self.read_type = read_type
         self.length = length
-        self.fastq_str = fastq_str
         self.mean_qscore = mean_qscore
         self.alignment_identity = 0.0
         self.alignment_reference_name = ''
+        if fastq_str:
+            self.fastq_parts = fastq_str.split('\n')
+            self.compression_ratio = zlib_compression_ratio(self.fastq_parts[1])
+        else:
+            self.fastq_parts = []
 
     def add_alignment_results(self, identity, reference_name):
         self.alignment_identity = identity
@@ -821,7 +836,8 @@ class FastqRead(object):
         table_line = [self.read_filename, self.sample_name, self.library_type, self.run_name,
                       self.flowcell_id, self.channel_number, self.basecalling, self.read_name,
                       self.read_type, str(self.length) if self.length else '',
-                      '%.2f' % self.mean_qscore if self.mean_qscore else '']
+                      '%.2f' % self.mean_qscore if self.mean_qscore else '',
+                      str(self.compression_ratio) if self.compression_ratio else '']
 
         if include_alignment_columns:
             table_line += ['%.2f' % self.alignment_identity if self.alignment_identity else '',
@@ -829,13 +845,14 @@ class FastqRead(object):
         return '\t'.join(table_line)
 
     def get_fastq_string(self):
+        if not self.fastq_parts:
+            return ''
+        name_line = self.fastq_parts[0]
         if self.alignment_identity and self.alignment_reference_name:
-            parts = self.fastq_str.split('\n')
-            name_line = parts[0] + ' reference=' + self.alignment_reference_name + \
+            name_line += ' reference=' + self.alignment_reference_name + \
                 ' identity=' + '%.2f' % self.alignment_identity + '%'
-            return '\n'.join([name_line, parts[1], parts[2], parts[3], ''])
-        else:
-            return self.fastq_str
+        return '\n'.join([name_line, self.fastq_parts[1], self.fastq_parts[2],
+                          self.fastq_parts[3], ''])
 
     def get_fasta_string(self):
         parts = self.get_fastq_string().split('\n')
@@ -892,6 +909,13 @@ class MyHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
             return wrapped_text_lines
         else:
             return argparse.ArgumentDefaultsHelpFormatter._split_lines(self, text, width)
+
+
+def zlib_compression_ratio(seq):
+    if isinstance(seq, str):
+        seq = seq.encode()
+    return len(zlib.compress(seq)) / len(seq)
+
 
 if __name__ == '__main__':
     main()
