@@ -294,7 +294,6 @@ class Sample(object):
                         fastq_str = hdf5_file[basecall_location].value.decode()
                     else:
                         basecalling = 'none'
-
                 except IOError:
                     pass
 
@@ -339,14 +338,18 @@ class Sample(object):
                     identity, reference_name = result
                     fastq_reads[read_name].add_alignment_results(identity, reference_name)
 
-        # Now we can remove the fastq file and create a new one which removes contaminant
+        # Now we can remove the fastq file and create a new one which removes contaminant/junk
         # sequences and sorts by quality.
         os.remove(fastq_filename)
         lengths, identities, identity_lengths = [], [], []
         with gzip.open(fastq_filename, 'wt') as fastq, open(fasta_filename, 'wt') as fasta:
+
             for fastq_read in sorted(fastq_reads.values(), reverse=True):
-                if not fastq_read.is_contamination() and fastq_read.length >= min_length and \
-                        fastq_read.compression_ratio >= min_compression_ratio:
+
+                bad_read = fastq_read.is_contamination() or fastq_read.length < min_length or \
+                    fastq_read.has_low_entropy(min_compression_ratio)
+
+                if not bad_read:
                     fastq.write(fastq_read.get_fastq_string())
                     fasta.write(fastq_read.get_fasta_string())
                     fastq_count += 1
@@ -354,6 +357,7 @@ class Sample(object):
                     if fastq_read.alignment_identity > 0:
                         identities.append(fastq_read.alignment_identity)
                         identity_lengths.append(fastq_read.length)
+
         print('  reads in filtered FASTQ: ' + str(len(lengths)))
         if lengths:
             print('  mean read length:        ' + '%.1f' % (sum(lengths) / len(lengths)))
@@ -363,7 +367,7 @@ class Sample(object):
             print('  mean identity:           ' +
                   '%.1f' % (weighted_average_list(identities, identity_lengths)) + '%')
 
-        # Write the results table to a text file.
+        # Write the results table to file.
         with open(info_filename, 'wt') as info:
             header = ['Filename', 'Sample name', 'Library type', 'Run name', 'Flowcell ID',
                       'Channel number', 'Basecalling', 'Read name', 'Read type', 'Length',
@@ -822,11 +826,13 @@ class FastqRead(object):
         self.mean_qscore = mean_qscore
         self.alignment_identity = 0.0
         self.alignment_reference_name = ''
+
         if fastq_str:
             self.fastq_parts = fastq_str.split('\n')
             self.compression_ratio = zlib_compression_ratio(self.fastq_parts[1])
         else:
             self.fastq_parts = []
+            self.compression_ratio = 0.0
 
     def add_alignment_results(self, identity, reference_name):
         self.alignment_identity = identity
@@ -837,7 +843,7 @@ class FastqRead(object):
                       self.flowcell_id, self.channel_number, self.basecalling, self.read_name,
                       self.read_type, str(self.length) if self.length else '',
                       '%.2f' % self.mean_qscore if self.mean_qscore else '',
-                      str(self.compression_ratio) if self.compression_ratio else '']
+                      '%.2f' % self.compression_ratio if self.compression_ratio else '']
 
         if include_alignment_columns:
             table_line += ['%.2f' % self.alignment_identity if self.alignment_identity else '',
@@ -871,6 +877,12 @@ class FastqRead(object):
         if 'lambda' in self.sample_name:
             return False
         return 'lambda_phage' in self.alignment_reference_name
+
+    def has_low_entropy(self, min_ratio):
+        if not self.compression_ratio:
+            return False
+        else:
+            return self.compression_ratio < min_ratio
 
 
 class MyHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
