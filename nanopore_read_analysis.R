@@ -127,6 +127,7 @@ p6 <- ggplot(bases, aes(x="", y=value, fill=Basecalling)) +
 
 # Save plots to png
 png_name = paste(file_path_sans_ext(input_tsv), "_plots.png", sep="")
+options(bitmapType='cairo')
 png(png_name, width = 5000, height = 3000, res = 300)
 multiplot(p1, p4, p2, p5, p3, p6, cols=3)
 garbage <- dev.off()
@@ -141,8 +142,8 @@ n50 = sorted_read_lengths[x]
 
 
 # Print some statistics
-message(paste("Mean read length:  ", mean(with_basecalling$Length)))
-message(paste("Median read length:", median(with_basecalling$Length)))
-message(paste("N50 read length:   ", n50))
-message(paste("Mean identity:     ", mean(with_alignments$Alignment.identity)))
-message(paste("Median identity:   ", median(with_alignments$Alignment.identity)))
+message(paste("Mean read length:   ", round(mean(with_basecalling$Length), 2), sep=""))
+message(paste("Median read length: ", median(with_basecalling$Length), sep=""))
+message(paste("N50 read length:    ", n50, sep=""))
+message(paste("Mean identity:      ", round(mean(with_alignments$Alignment.identity), 2), "%", sep=""))
+message(paste("Median identity:    ", median(with_alignments$Alignment.identity), "%", sep=""))

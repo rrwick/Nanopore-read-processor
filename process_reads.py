@@ -66,6 +66,8 @@ def main():
             sample.basecall_where_necessary(args.nanonet_threads)
         if 'fastq' in args.command:
             sample.extract_fastq(args.min_fastq_length, args.alignment_threads)
+        if 'figures' in args.command:
+            sample.make_ggplot_figures()
         if 'tarball' in args.command:
             sample.gzip_fast5s()
 
@@ -73,7 +75,7 @@ def main():
 def get_arguments():
 
     default_nanonet_threads = multiprocessing.cpu_count()
-    default_alignment_threads = min(multiprocessing.cpu_count(), 40)
+    default_alignment_threads = multiprocessing.cpu_count()
 
     parser = argparse.ArgumentParser(description='Nanopore read processor for Happyfeet',
                                      formatter_class=MyHelpFormatter)
@@ -82,8 +84,9 @@ def get_arguments():
                              '  list      just display simple info about the read set\n'
                              '  sort      move reads into directories with their basecall content\n'
                              '  basecall  run nanonet on reads without base info\n'
-                             '  fastq     produce FASTQ files\n'
-                             '  tarball   bundle up FAST5 files in tar.gz files\n'
+                             '  fastq     produce fastq and tsv files\n'
+                             '  figures   create png of ggplot figures\n'
+                             '  tarball   bundle up fast5 files in tar.gz files\n'
                              '  all       all of the above')
     parser.add_argument('--samples', nargs='+', required=True, type=str, default=argparse.SUPPRESS,
                         help='Which samples to process - can be a partial name match or "all" to '
@@ -98,12 +101,12 @@ def get_arguments():
 
     args = parser.parse_args()
 
-    valid_commands = ['list', 'sort', 'basecall', 'fastq', 'tarball', 'all']
+    valid_commands = ['list', 'sort', 'basecall', 'fastq', 'figures', 'tarball', 'all']
     if any(x not in valid_commands for x in args.command):
         parser.error('command(s) must be one of the following: ' + ', '.join(valid_commands))
 
     if 'all' in args.command:
-        args.command = ['sort', 'basecall', 'fastq', 'tarball']
+        args.command = ['sort', 'basecall', 'fastq', 'figures', 'tarball']
 
     return args
 
@@ -326,7 +329,7 @@ class Sample(object):
                        '--no_graphmap', '--threads', str(threads), '--verbosity', '2',
                        '--contamination', 'lambda', '--keep_bad', '--min_len', '1']
 
-            p = subprocess.Popen(command, stderr=subprocess.STDOUT, shell=False,
+            p = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  preexec_fn=lambda: os.nice(20))
             out, _ = p.communicate()
             p.wait()
@@ -354,16 +357,17 @@ class Sample(object):
                         identities.append(fastq_read.alignment_identity)
                         identity_lengths.append(fastq_read.length)
 
-        print('  reads in filtered FASTQ: ' + str(len(lengths)))
-        if lengths:
-            print('  mean read length:        ' + '%.1f' % (sum(lengths) / len(lengths)))
-        if identities:
-            print('  percent aligned:         ' +
-                  '%.1f' % (100.0 * len(identity_lengths) / len(lengths)) + '%')
-            print('  mean identity:           ' +
-                  '%.1f' % (weighted_average_list(identities, identity_lengths)) + '%')
+        # print('  reads in filtered FASTQ: ' + str(len(lengths)))
+        # if lengths:
+        #     print('  mean read length:        ' + '%.1f' % (sum(lengths) / len(lengths)))
+        # if identities:
+        #     print('  percent aligned:         ' +
+        #           '%.1f' % (100.0 * len(identity_lengths) / len(lengths)) + '%')
+        #     print('  mean identity:           ' +
+        #           '%.1f' % (weighted_average_list(identities, identity_lengths)) + '%')
 
         # Write the results table to file.
+        print('creating table of read info: ' + os.path.basename(info_filename), flush=True)
         with open(info_filename, 'wt') as info:
             header = ['Filename', 'Sample name', 'Library type', 'Run name', 'Flowcell ID',
                       'Channel number', 'Basecalling', 'Read name', 'Read type', 'Length',
@@ -376,15 +380,24 @@ class Sample(object):
                 info.write(fastq_read.get_table_line(bool(self.reference)))
                 info.write('\n')
 
-        # Now run the ggplot R script on the table.
+    def make_ggplot_figures(self):
+        _, info_filename = self.get_fastq_paths()
+        if not os.path.isfile(info_filename):
+            print('Could not find tsv file: ' + info_filename)
+            return
         r_script = os.path.join(os.path.dirname(os.path.realpath(__file__)),
                                 'nanopore_read_analysis.R')
-        command = [r_script, info_filename]
-        p = subprocess.Popen(command, preexec_fn=lambda: os.nice(20))
-        out, _ = p.communicate()
-        p.wait()
-        print(out)
+
         print()
+        print(' '.join(['nanopore_read_analysis.R', info_filename]), flush=True)
+        command = [r_script, info_filename]
+        p = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             preexec_fn=lambda: os.nice(20))
+        out, err = p.communicate()
+        p.wait()
+        script_output_lines = err.decode().splitlines()
+        for line in script_output_lines:
+            print('  ' + line)
 
     def print_read_dirs(self):
         read_dirs = self.all_dirs
@@ -424,8 +437,7 @@ class Sample(object):
     def gzip_fast5s(self):
         tarball = self.get_tarball_path()
         if os.path.isfile(tarball):
-            print(tarball.split('/')[-1] + ' already exists\n')
-            return
+            os.remove(tarball)
 
         print('\ngzipping reads into a tar.gz file...', flush=True)
 
@@ -441,10 +453,15 @@ class Sample(object):
         current_dir = os.getcwd()
         os.chdir(self.base_dir)
 
-        tar_cmd = ['tar', '-czvf', tarball] + rel_dirs
-        print('  ' + ' '.join(tar_cmd), flush=True)
+        # Use pigz if available to speed up the compression.
+        pigz_path = shutil.which('pigz')
+        if pigz_path:
+            tar_cmd = 'tar cf - ' + ' '.join(rel_dirs) + ' | pigz -9 -p 12 > ' + tarball
+        else:
+            tar_cmd = 'tar -czvf ' + tarball + ' '.join(rel_dirs)
+
         tar = subprocess.Popen(tar_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               preexec_fn=lambda: os.nice(20))
+                               preexec_fn=lambda: os.nice(20), shell=True)
         _, _ = tar.communicate()
         tar.wait()
         os.chdir(current_dir)
@@ -893,8 +910,8 @@ class FastqRead(object):
         """
         We filter out reads that are too short, aligned to contamination or fail the entropy test.
         """
-        self.pass_qc = self.length >= min_length or self.is_contamination() or \
-            self.has_low_entropy(have_reference)
+        self.pass_qc = self.length >= min_length and not self.is_contamination() and \
+            not self.has_low_entropy(have_reference)
         return self.pass_qc
 
     def has_low_entropy(self, have_reference):
@@ -905,12 +922,12 @@ class FastqRead(object):
         # entropy looks moderately low and it has either a bad alignment or no alignment,
         # then it fails the test.
         if have_reference:
-            return self.compression_ratio < 0.28 and self.alignment_identity < 65.0
+            return self.compression_ratio < 0.25 and self.alignment_identity < 65.0
 
         # If we don't have a reference, then we set the threshold lower, only failing
         # particularly low entropy reads.
         else:
-            return self.compression_ratio < 0.20
+            return self.compression_ratio < 0.15
 
 
 class MyHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
