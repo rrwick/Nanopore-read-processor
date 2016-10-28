@@ -65,8 +65,7 @@ def main():
         if 'basecall' in args.command:
             sample.basecall_where_necessary(args.nanonet_threads)
         if 'fastq' in args.command:
-            sample.extract_fastq(args.min_fastq_length, args.min_compression_ratio,
-                                 args.alignment_threads)
+            sample.extract_fastq(args.min_fastq_length, args.alignment_threads)
         if 'tarball' in args.command:
             sample.gzip_fast5s()
 
@@ -93,13 +92,9 @@ def get_arguments():
                         help='The number of threads to use for nanonet')
     parser.add_argument('--alignment_threads', type=int, default=default_alignment_threads,
                         help='The number of threads to use for aligning reads')
-    parser.add_argument('--min_fastq_length', type=int, default=100,
+    parser.add_argument('--min_fastq_length', type=int, default=200,
                         help='Reads shorter than this length (in bp) will not be included in the '
                              'FASTQ files')
-    parser.add_argument('--min_compression_ratio', type=float, default=0.05,
-                        help='Reads with a sequence that have a zlib compression ratio of less '
-                             'than this value are assumed to be repetitive nonsense and are not '
-                             'included in the FASTQ files')
 
     args = parser.parse_args()
 
@@ -251,9 +246,10 @@ class Sample(object):
         print('\n\n' + bold_yellow_underline(self.name))
         self.print_read_dirs()
 
-    def extract_fastq(self, min_length, min_compression_ratio, threads):
+    def extract_fastq(self, min_length, threads):
         if not self.all_dirs:
             return
+        have_reference = bool(self.reference)
 
         print('\nextracting FASTQs from reads...', flush=True)
         fastq_filename, info_filename = self.get_fastq_paths()
@@ -322,15 +318,20 @@ class Sample(object):
         print()
 
         # If a reference exists, use Unicycler align to align the reads to get the identity.
-        if self.reference:
+        if have_reference:
             print('\naligning reads to ' + os.path.basename(self.reference), flush=True)
             temp_sam = 'temp_' + str(random.randint(0, 100000000)) + '.sam'
             command = ['/home/UNIMELB/inouye-hpc-sa/Unicycler/unicycler_align-runner.py',
                        '--ref', self.reference, '--reads', fastq_filename, '--sam', temp_sam,
                        '--no_graphmap', '--threads', str(threads), '--verbosity', '2',
                        '--contamination', 'lambda', '--keep_bad', '--min_len', '1']
-            out = subprocess.check_output(command, stderr=subprocess.STDOUT, shell=False)
+
+            p = subprocess.Popen(command, stderr=subprocess.STDOUT, shell=False,
+                                 preexec_fn=lambda: os.nice(20))
+            out, _ = p.communicate()
+            p.wait()
             os.remove(temp_sam)
+
             alignment_results = parse_unicycler_align_output(out.decode(),
                                                              os.path.basename(self.reference))
             for read_name, result in alignment_results.items():
@@ -338,18 +339,13 @@ class Sample(object):
                     identity, reference_name = result
                     fastq_reads[read_name].add_alignment_results(identity, reference_name)
 
-        # Now we can remove the fastq file and create a new one which removes contaminant/junk
-        # sequences and sorts by quality.
+        # Now we can remove the fastq file and create a new one without contaminant/junk
+        # sequences and sorted by quality.
         os.remove(fastq_filename)
         lengths, identities, identity_lengths = [], [], []
         with gzip.open(fastq_filename, 'wt') as fastq, open(fasta_filename, 'wt') as fasta:
-
             for fastq_read in sorted(fastq_reads.values(), reverse=True):
-
-                bad_read = fastq_read.is_contamination() or fastq_read.length < min_length or \
-                    fastq_read.has_low_entropy(min_compression_ratio)
-
-                if not bad_read:
+                if fastq_read.pass_qc_test(min_length, have_reference):
                     fastq.write(fastq_read.get_fastq_string())
                     fasta.write(fastq_read.get_fasta_string())
                     fastq_count += 1
@@ -374,11 +370,20 @@ class Sample(object):
                       'Mean qscore', 'zlib compression ratio']
             if self.reference:
                 header += ['Alignment identity', 'Alignment reference']
+            header += ['Pass QC']
             info.write('\t'.join(header) + '\n')
-
             for fastq_read in fastq_reads.values():
                 info.write(fastq_read.get_table_line(bool(self.reference)))
                 info.write('\n')
+
+        # Now run the ggplot R script on the table.
+        r_script = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                                'nanopore_read_analysis.R')
+        command = [r_script, info_filename]
+        p = subprocess.Popen(command, preexec_fn=lambda: os.nice(20))
+        out, _ = p.communicate()
+        p.wait()
+        print(out)
         print()
 
     def print_read_dirs(self):
@@ -438,7 +443,8 @@ class Sample(object):
 
         tar_cmd = ['tar', '-czvf', tarball] + rel_dirs
         print('  ' + ' '.join(tar_cmd), flush=True)
-        tar = subprocess.Popen(tar_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        tar = subprocess.Popen(tar_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               preexec_fn=lambda: os.nice(20))
         _, _ = tar.communicate()
         tar.wait()
         os.chdir(current_dir)
@@ -656,11 +662,10 @@ def nanonetcall(directory, threads):
     temp_fastq = 'temp_' + str(random.randint(0, 100000000)) + '.fastq'
     nanonetcall_cmd = ['nanonetcall', '--fastq', '--write_events', '--jobs', str(threads),
                        '--max_len', '100000', directory]
-    try:
-        with open(temp_fastq, 'wb') as fastq_out:
-            subprocess.check_call(nanonetcall_cmd, stdout=fastq_out)
-    except subprocess.CalledProcessError:
-        pass
+    with open(temp_fastq, 'wb') as fastq_out:
+        p = subprocess.Popen(nanonetcall_cmd, stdout=fastq_out, preexec_fn=lambda: os.nice(20))
+        _, _ = p.communicate()
+        p.wait()
     remove_if_exists(temp_fastq)
 
 
@@ -668,10 +673,9 @@ def nanonetcall_2d(directory, threads):
     temp_prefix = 'temp_' + str(random.randint(0, 100000000))
     nanonet2d_cmd = ['nanonet2d', '--fastq', '--write_events', '--jobs', str(threads),
                      '--max_len', '100000', directory, temp_prefix]
-    try:
-        subprocess.check_call(nanonet2d_cmd)
-    except subprocess.CalledProcessError:
-        pass
+    p = subprocess.Popen(nanonet2d_cmd, preexec_fn=lambda: os.nice(20))
+    _, _ = p.communicate()
+    p.wait()
     remove_if_exists(temp_prefix + '_template.fastq')
     remove_if_exists(temp_prefix + '_complement.fastq')
     remove_if_exists(temp_prefix + '_2d.fastq')
@@ -826,6 +830,11 @@ class FastqRead(object):
         self.mean_qscore = mean_qscore
         self.alignment_identity = 0.0
         self.alignment_reference_name = ''
+        self.pass_qc = True
+
+        # Before any alignment, a read's sort score is very low and based only on length and mean
+        # qscore.
+        self.sort_score = self.length * self.mean_qscore * 0.0001
 
         if fastq_str:
             self.fastq_parts = fastq_str.split('\n')
@@ -838,16 +847,22 @@ class FastqRead(object):
         self.alignment_identity = identity
         self.alignment_reference_name = reference_name
 
+        # Now that the read has been aligned, we can enhance its sort score using its alignment
+        if self.alignment_identity > 50.0:
+            id_frac = self.alignment_identity / 100.0
+            new_sort_score = self.length * (0.99 * 8 * (id_frac - 0.5)**3 + 0.01)
+            self.sort_score = max(new_sort_score, self.sort_score)
+
     def get_table_line(self, include_alignment_columns):
         table_line = [self.read_filename, self.sample_name, self.library_type, self.run_name,
                       self.flowcell_id, self.channel_number, self.basecalling, self.read_name,
                       self.read_type, str(self.length) if self.length else '',
                       '%.2f' % self.mean_qscore if self.mean_qscore else '',
-                      '%.2f' % self.compression_ratio if self.compression_ratio else '']
-
+                      '%.4f' % self.compression_ratio if self.compression_ratio else '']
         if include_alignment_columns:
             table_line += ['%.2f' % self.alignment_identity if self.alignment_identity else '',
                            self.alignment_reference_name]
+        table_line.append('Y' if self.pass_qc else 'N')
         return '\t'.join(table_line)
 
     def get_fastq_string(self):
@@ -864,12 +879,8 @@ class FastqRead(object):
         parts = self.get_fastq_string().split('\n')
         return '\n'.join(['>' + parts[0][1:], parts[1], ''])
 
-    def comparison_tuple(self):
-        return (self.alignment_identity if self.alignment_identity else 0.0, self.mean_qscore,
-                self.length)
-
     def __lt__(self, other):
-        return self.comparison_tuple() < other.comparison_tuple()
+        return self.sort_score < other.sort_score
 
     def is_contamination(self):
         if not self.alignment_reference_name:
@@ -878,11 +889,28 @@ class FastqRead(object):
             return False
         return 'lambda_phage' in self.alignment_reference_name
 
-    def has_low_entropy(self, min_ratio):
+    def pass_qc_test(self, min_length, have_reference):
+        """
+        We filter out reads that are too short, aligned to contamination or fail the entropy test.
+        """
+        self.pass_qc = self.length >= min_length or self.is_contamination() or \
+            self.has_low_entropy(have_reference)
+        return self.pass_qc
+
+    def has_low_entropy(self, have_reference):
         if not self.compression_ratio:
             return False
+
+        # If we have tried to align this read to a reference, then we are more picky. If its
+        # entropy looks moderately low and it has either a bad alignment or no alignment,
+        # then it fails the test.
+        if have_reference:
+            return self.compression_ratio < 0.28 and self.alignment_identity < 65.0
+
+        # If we don't have a reference, then we set the threshold lower, only failing
+        # particularly low entropy reads.
         else:
-            return self.compression_ratio < min_ratio
+            return self.compression_ratio < 0.20
 
 
 class MyHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
