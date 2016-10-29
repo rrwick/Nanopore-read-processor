@@ -20,26 +20,32 @@ import re
 import collections
 import shutil
 import zlib
+import itertools
 
 
 def sort_score_function(identity, length):
     """
     A somewhat arbitrary scoring system to compare reads using both their alignment and identity.
-    It has a linear relationship to the length (e.g. 2x as long gives 2x the score) and a cubic
-    relationship to the identity, bottoming out at 50% identity.
+    It has a linear relationship to length (e.g. 2x as long gives 2x the score) and a
+    higher-order relationship to identity, bottoming out at 50% identity.
     """
     id_frac = max(identity, 50.0) / 100.0
-    return length * (0.99 * 8 * (id_frac - 0.5) ** 3 + 0.01)
+    return length * (0.999 * 16 * (id_frac - 0.5) ** 4 + 0.001)
 
-good_read_threshold = sort_score_function(75.0, 1000)
+good_read_threshold = sort_score_function(80.0, 1000)
 v_good_read_threshold = sort_score_function(90.0, 5000)
 
 
 def main():
     args = get_arguments()
 
+    fast5_paths = ['/home/UNIMELB/inouye-hpc-sa/nanopore-data/fast5']
+    if args.include_processed:
+        fast5_paths.append('/home/UNIMELB/inouye-hpc-sa/nanopore-data/fast5_processed')
+
     samples = {}
-    for dir_name, _, filenames in os.walk('/home/UNIMELB/inouye-hpc-sa/nanopore-data/fast5'):
+    for dir_name, _, filenames in itertools.chain.from_iterable(os.walk(path)
+                                                                for path in fast5_paths):
         if any('.fast5' in f for f in filenames):
             if '2d' in dir_name:
                 name_parts = dir_name.split('/2d/')
@@ -66,9 +72,13 @@ def main():
     else:
         samples_to_process = []
         for user_specified_sample in args.samples:
+            found_sample = False
             for sample in samples_by_read_count:
                 if user_specified_sample in sample.name and sample.name not in samples_to_process:
                     samples_to_process.append(sample.name)
+                    found_sample = True
+            if not found_sample:
+                print('WARNING: ' + user_specified_sample + ' did match any samples')
 
     for sample_name in samples_to_process:
         sample = samples[sample_name]
@@ -83,6 +93,8 @@ def main():
             sample.make_ggplot_figures()
         if 'tarball' in args.command:
             sample.gzip_fast5s()
+        if 'scp' in args.command:
+            sample.send_to_helix()
 
 
 def get_arguments():
@@ -97,13 +109,16 @@ def get_arguments():
                              '  list      just display simple info about the read set\n'
                              '  sort      move reads into directories with their basecall content\n'
                              '  basecall  run nanonet on reads without base info\n'
-                             '  fastq     produce fastq and tsv files\n'
+                             '  fastq     produce fasta, fastq and tsv files\n'
                              '  figures   create png of ggplot figures\n'
                              '  tarball   bundle up fast5 files in tar.gz files\n'
+                             '  scp       copy fasta, fastq, tsv and tar.gz files to Helix\n'
                              '  all       all of the above')
     parser.add_argument('--samples', nargs='+', required=True, type=str, default=argparse.SUPPRESS,
                         help='Which samples to process - can be a partial name match or "all" to '
                              'process all samples')
+    parser.add_argument('--include_processed', action='store_true',
+                        help='Extend fast5 search to /fast5_processed/ directory')
     parser.add_argument('--nanonet_threads', type=int, default=default_nanonet_threads,
                         help='The number of threads to use for nanonet')
     parser.add_argument('--alignment_threads', type=int, default=default_alignment_threads,
@@ -111,15 +126,16 @@ def get_arguments():
     parser.add_argument('--min_fastq_length', type=int, default=200,
                         help='Reads shorter than this length (in bp) will not be included in the '
                              'FASTQ files')
+    # TO DO: make an option to also check the fast5_processed directory
 
     args = parser.parse_args()
 
-    valid_commands = ['list', 'sort', 'basecall', 'fastq', 'figures', 'tarball', 'all']
+    valid_commands = ['list', 'sort', 'basecall', 'fastq', 'figures', 'tarball', 'scp', 'all']
     if any(x not in valid_commands for x in args.command):
         parser.error('command(s) must be one of the following: ' + ', '.join(valid_commands))
 
     if 'all' in args.command:
-        args.command = ['sort', 'basecall', 'fastq', 'figures', 'tarball']
+        args.command = ['sort', 'basecall', 'fastq', 'figures', 'tarball', 'scp']
 
     return args
 
@@ -265,11 +281,12 @@ class Sample(object):
     def extract_fastq(self, min_length, threads):
         if not self.all_dirs:
             return
-        have_reference = bool(self.reference)
-
         print('\nextracting FASTQs from reads...', flush=True)
-        fastq_filename, good_fastq_filename, v_good_fastq_filename, info_filename = \
-            self.get_read_paths()
+
+        have_reference = bool(self.reference)
+        fastq_filename, good_fastq_filename, v_good_fastq_filename, fasta_filename, \
+            good_fasta_filename, v_good_fasta_filename = self.get_extracted_read_paths()
+        info_filename = self.get_tsv_path()
 
         fastq_reads = collections.OrderedDict()
         with gzip.open(fastq_filename, 'wt') as fastq:
@@ -354,6 +371,8 @@ class Sample(object):
                 if read_name in fastq_reads:
                     identity, reference_name = result
                     fastq_reads[read_name].add_alignment_results(identity, reference_name)
+        else:
+            print()
 
         # Now we can remove the fastq file and create a new one without contaminant/junk
         # sequences and sorted by quality.
@@ -363,7 +382,11 @@ class Sample(object):
         read_filenames = [fastq_filename, fasta_filename, good_fastq_filename, good_fasta_filename,
                           v_good_fastq_filename, v_good_fasta_filename]
         for read_filename in read_filenames:
-            os.remove(read_filename)
+            if os.path.isfile(read_filename):
+                os.remove(read_filename)
+
+        at_least_one_good_read = False
+        at_least_one_v_good_read = False
 
         with gzip.open(fastq_filename, 'wt') as fastq,\
                 gzip.open(fasta_filename, 'wt') as fasta, \
@@ -384,15 +407,21 @@ class Sample(object):
                     if fastq_read.sort_score >= good_read_threshold:
                         good_fasta.write(fasta_str)
                         good_fastq.write(fastq_str)
+                        at_least_one_good_read = True
 
                     if fastq_read.sort_score >= v_good_read_threshold:
                         v_good_fasta.write(fasta_str)
                         v_good_fastq.write(fastq_str)
+                        at_least_one_v_good_read = True
 
         # Delete any empty files. If there was no reference to align to, this will almost
         # certainly mean deleting the good and very_good files.
-        for read_filename in [x for x in read_filenames if os.stat(x).st_size == 0]:
-            os.remove(read_filename)
+        if not at_least_one_v_good_read:
+            os.remove(v_good_fasta_filename)
+            os.remove(v_good_fastq_filename)
+        if not at_least_one_good_read:
+            os.remove(good_fasta_filename)
+            os.remove(good_fastq_filename)
 
         # Write the results table to file.
         print('creating table of read info: ' + os.path.basename(info_filename), flush=True)
@@ -409,19 +438,13 @@ class Sample(object):
                 info.write('\n')
 
     def make_ggplot_figures(self):
-        _, _, _, info_filename = self.get_read_paths()
+        info_filename = self.get_tsv_path()
         if not os.path.isfile(info_filename):
             print('Could not find tsv file: ' + info_filename)
             return
 
-        have_reference = bool(self.reference)
-        if not have_reference:
-            print('Cannot produce figures with an alignment reference')
-            return
-
         r_script = os.path.join(os.path.dirname(os.path.realpath(__file__)),
                                 'nanopore_read_analysis.R')
-
         print()
         print(' '.join(['nanopore_read_analysis.R', info_filename]), flush=True)
         command = [r_script, info_filename]
@@ -460,15 +483,25 @@ class Sample(object):
             os.makedirs(tarball_dir)
         return tarball_dir + self.name + '_fast5.tar.gz'
 
-    def get_read_paths(self):
-        fastq_dir = '/home/UNIMELB/inouye-hpc-sa/nanopore-data/fastq/' + self.name + '/'
-        if not os.path.exists(fastq_dir):
-            os.makedirs(fastq_dir)
+    def get_extracted_read_paths(self):
+        fastq_dir = self.get_fastq_dir_path()
         fastq_filename = fastq_dir + self.name + '.fastq.gz'
         good_fastq_filename = fastq_filename.replace('.fastq.gz', '_good.fastq.gz')
         v_good_fastq_filename = fastq_filename.replace('.fastq.gz', '_very_good.fastq.gz')
-        info_filename = fastq_dir + self.name + '.tsv'
-        return fastq_filename, good_fastq_filename, v_good_fastq_filename, info_filename
+        fasta_filename = fastq_filename.replace('.fastq.gz', '.fasta.gz')
+        good_fasta_filename = good_fastq_filename.replace('.fastq.gz', '.fasta.gz')
+        v_good_fasta_filename = v_good_fastq_filename.replace('.fastq.gz', '.fasta.gz')
+        return fastq_filename, good_fastq_filename, v_good_fastq_filename, \
+            fasta_filename, good_fasta_filename, v_good_fasta_filename
+
+    def get_tsv_path(self):
+        return self.get_fastq_dir_path() + self.name + '.tsv'
+
+    def get_fastq_dir_path(self):
+        fastq_dir = '/home/UNIMELB/inouye-hpc-sa/nanopore-data/fastq/' + self.name + '/'
+        if not os.path.exists(fastq_dir):
+            os.makedirs(fastq_dir)
+        return fastq_dir
 
     def gzip_fast5s(self):
         tarball = self.get_tarball_path()
@@ -501,6 +534,67 @@ class Sample(object):
         _, _ = tar.communicate()
         tar.wait()
         os.chdir(current_dir)
+
+    def send_to_helix(self):
+        print('\nTransferring local files to Helix')
+        files_to_scp = []
+
+        tarball = self.get_tarball_path()
+        if not os.path.isfile(tarball):
+            print('WARNING: ' + tarball + ' does not exist')
+        elif not self.tarball_count_is_correct():
+            print('wrong number of fast5 files in ' + os.path.basename(tarball) +
+                  ', making again...')
+            self.gzip_fast5s()
+        if os.path.isfile(tarball):
+            files_to_scp.append(tarball)
+
+        extracted_read_files = [x for x in self.get_extracted_read_paths() if os.path.isfile(x)]
+        if not extracted_read_files:
+            print('WARNING: no extracted read files exist')
+        else:
+            files_to_scp += extracted_read_files
+
+        info_file = self.get_tsv_path()
+        if not os.path.isfile(info_file):
+            print('WARNING: ' + info_file + ' does not exist')
+        else:
+            files_to_scp.append(info_file)
+
+        figures_file = info_file.replace('.tsv', '_plots.png')
+        if not os.path.isfile(figures_file):
+            print('WARNING: ' + figures_file + ' does not exist')
+        else:
+            files_to_scp.append(figures_file)
+
+        # Make sure the destination directory exists.
+        destination_dir = '/vlsci/SGN0001/shared/nanopore/reads/' + self.name + '/'
+        cmd = 'ssh rwick@helix.vlsci.unimelb.edu.au "mkdir -p ' + destination_dir + '"'
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+        _, _ = p.communicate()
+        p.wait()
+
+        scp_files(files_to_scp, destination_dir)
+
+        # Now that the transfer is done, we call this read set 'processed' and move it to a
+        # slightly different directory so future runs of the script can skip it.
+        new_base_dir = self.base_dir.replace('/fast5/', '/fast5_processed/')
+        os.renames(self.base_dir, new_base_dir)
+
+    def tarball_count_is_correct(self):
+        tarball = self.get_tarball_path()
+        print('Checking that fast5 file count matches that in ' + os.path.basename(tarball) +
+              '...  ', end='')
+        fast5_count = len(self.all_fast5_files)
+        tar_count_cmd = 'pigz -dc ' + tarball + ' | tar tf - | grep -P ".fast5$" | wc -l'
+        p = subprocess.Popen(tar_count_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             preexec_fn=lambda: os.nice(20), shell=True)
+        out, _ = p.communicate()
+        tar_count = int(out.decode())
+        match = tar_count == fast5_count
+        if match:
+            print('all good!')
+        return match
 
     def read_has_basecall(self, fast5_file):
         if self.library_type == '2d':
@@ -716,7 +810,8 @@ def nanonetcall(directory, threads):
     nanonetcall_cmd = ['nanonetcall', '--fastq', '--write_events', '--jobs', str(threads),
                        '--max_len', '100000', directory]
     with open(temp_fastq, 'wb') as fastq_out:
-        p = subprocess.Popen(nanonetcall_cmd, stdout=fastq_out, preexec_fn=lambda: os.nice(20))
+        p = subprocess.Popen(nanonetcall_cmd, stdout=fastq_out, stderr=subprocess.PIPE,
+                             preexec_fn=lambda: os.nice(20))
         _, _ = p.communicate()
         p.wait()
     remove_if_exists(temp_fastq)
@@ -726,7 +821,8 @@ def nanonetcall_2d(directory, threads):
     temp_prefix = 'temp_' + str(random.randint(0, 100000000))
     nanonet2d_cmd = ['nanonet2d', '--fastq', '--write_events', '--jobs', str(threads),
                      '--max_len', '100000', directory, temp_prefix]
-    p = subprocess.Popen(nanonet2d_cmd, preexec_fn=lambda: os.nice(20))
+    p = subprocess.Popen(nanonet2d_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         preexec_fn=lambda: os.nice(20))
     _, _ = p.communicate()
     p.wait()
     remove_if_exists(temp_prefix + '_template.fastq')
@@ -923,8 +1019,9 @@ class FastqRead(object):
                       '%.2f' % self.mean_qscore if self.mean_qscore else '',
                       '%.4f' % self.compression_ratio if self.compression_ratio else '']
         if include_alignment_columns:
-            table_line += ['%.2f' % self.alignment_identity if self.alignment_identity else '',
-                           self.alignment_reference_name, self.quality_category]
+            table_line.append('%.2f' % self.alignment_identity if self.alignment_identity else '')
+            table_line.append(self.alignment_reference_name)
+        table_line.append(self.quality_category)
         return '\t'.join(table_line)
 
     def get_fastq_string(self):
@@ -1019,6 +1116,58 @@ def zlib_compression_ratio(seq):
     if isinstance(seq, str):
         seq = seq.encode()
     return len(zlib.compress(seq)) / len(seq)
+
+
+def scp_files(local_filepaths, destination_filepath):
+    while True:
+        cmd = 'scp ' + ' '.join(local_filepaths) + ' rwick@helix.vlsci.unimelb.edu.au:' + \
+              destination_filepath
+        print(cmd)
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+        out, _ = p.communicate()
+        p.wait()
+        if p.returncode == 0:
+            break
+    print('success!')
+
+    # destination_filesize = get_helix_filesize(destination_filepath)
+    # local_filesize = get_local_filesize(local_filepath)
+    # if local_filesize == destination_filesize:
+    #     print(short_name + ' already exists on Helix and is the same size as the local copy - no '
+    #           'transfer needed')
+    # elif local_filesize <= destination_filesize:
+    #     print(short_name + ' already exists on Helix and is larger than the local copy - not '
+    #           'overwriting')
+    # else:
+    #     while local_filesize > destination_filesize:
+    #         cmd = 'scp ' + local_filepath + ' rwick@helix.vlsci.unimelb.edu.au:' + \
+    #               destination_filepath
+    #         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+    #         out, _ = p.communicate()
+    #         p.wait()
+    #         destination_filesize = get_helix_filesize(destination_filepath)
+
+
+# def get_helix_filesize(helix_filepath):
+#     cmd = 'ssh rwick@helix.vlsci.unimelb.edu.au "stat -c \'%s\' ' + helix_filepath + '"'
+#     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+#     out, _ = p.communicate()
+#     p.wait()
+#     try:
+#         return int(out.decode())
+#     except ValueError:
+#         return 0
+
+
+# def get_local_filesize(local_filepath):
+#     cmd = 'stat -c \'%s\' ' + local_filepath
+#     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+#     out, _ = p.communicate()
+#     p.wait()
+#     try:
+#         return int(out.decode())
+#     except ValueError:
+#         return 0
 
 
 if __name__ == '__main__':

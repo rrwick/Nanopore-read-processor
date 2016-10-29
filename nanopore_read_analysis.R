@@ -156,5 +156,7 @@ n50 = sorted_read_lengths[x]
 message(paste("Mean read length:   ", round(mean(with_basecalling$Length), 2), sep=""))
 message(paste("Median read length: ", median(with_basecalling$Length), sep=""))
 message(paste("N50 read length:    ", n50, sep=""))
-message(paste("Mean identity:      ", round(mean(with_alignments$Alignment.identity), 2), "%", sep=""))
-message(paste("Median identity:    ", median(with_alignments$Alignment.identity), "%", sep=""))
+if (alignment_data_exists) {
+  message(paste("Mean identity:      ", round(mean(with_alignments$Alignment.identity), 2), "%", sep=""))
+  message(paste("Median identity:    ", median(with_alignments$Alignment.identity), "%", sep=""))
+}
