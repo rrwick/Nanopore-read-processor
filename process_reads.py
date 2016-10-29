@@ -22,6 +22,19 @@ import shutil
 import zlib
 
 
+def sort_score_function(identity, length):
+    """
+    A somewhat arbitrary scoring system to compare reads using both their alignment and identity.
+    It has a linear relationship to the length (e.g. 2x as long gives 2x the score) and a cubic
+    relationship to the identity, bottoming out at 50% identity.
+    """
+    id_frac = max(identity, 50.0) / 100.0
+    return length * (0.99 * 8 * (id_frac - 0.5) ** 3 + 0.01)
+
+good_read_threshold = sort_score_function(75.0, 1000)
+v_good_read_threshold = sort_score_function(90.0, 5000)
+
+
 def main():
     args = get_arguments()
 
@@ -255,8 +268,8 @@ class Sample(object):
         have_reference = bool(self.reference)
 
         print('\nextracting FASTQs from reads...', flush=True)
-        fastq_filename, info_filename = self.get_fastq_paths()
-        fasta_filename = fastq_filename.replace('.fastq.gz', '.fasta')
+        fastq_filename, good_fastq_filename, v_good_fastq_filename, info_filename = \
+            self.get_read_paths()
 
         fastq_reads = collections.OrderedDict()
         with gzip.open(fastq_filename, 'wt') as fastq:
@@ -344,27 +357,42 @@ class Sample(object):
 
         # Now we can remove the fastq file and create a new one without contaminant/junk
         # sequences and sorted by quality.
-        os.remove(fastq_filename)
-        lengths, identities, identity_lengths = [], [], []
-        with gzip.open(fastq_filename, 'wt') as fastq, open(fasta_filename, 'wt') as fasta:
+        fasta_filename = fastq_filename.replace('.fastq', '.fasta')
+        good_fasta_filename = good_fastq_filename.replace('.fastq', '.fasta')
+        v_good_fasta_filename = v_good_fastq_filename.replace('.fastq', '.fasta')
+        read_filenames = [fastq_filename, fasta_filename, good_fastq_filename, good_fasta_filename,
+                          v_good_fastq_filename, v_good_fasta_filename]
+        for read_filename in read_filenames:
+            os.remove(read_filename)
+
+        with gzip.open(fastq_filename, 'wt') as fastq,\
+                gzip.open(fasta_filename, 'wt') as fasta, \
+                gzip.open(good_fastq_filename, 'wt') as good_fastq, \
+                gzip.open(good_fasta_filename, 'wt') as good_fasta, \
+                gzip.open(v_good_fastq_filename, 'wt') as v_good_fastq, \
+                gzip.open(v_good_fasta_filename, 'wt') as v_good_fasta:
+
             for fastq_read in sorted(fastq_reads.values(), reverse=True):
                 if fastq_read.pass_qc_test(min_length, have_reference):
-                    fastq.write(fastq_read.get_fastq_string())
-                    fasta.write(fastq_read.get_fasta_string())
-                    fastq_count += 1
-                    lengths.append(fastq_read.length)
-                    if fastq_read.alignment_identity > 0:
-                        identities.append(fastq_read.alignment_identity)
-                        identity_lengths.append(fastq_read.length)
 
-        # print('  reads in filtered FASTQ: ' + str(len(lengths)))
-        # if lengths:
-        #     print('  mean read length:        ' + '%.1f' % (sum(lengths) / len(lengths)))
-        # if identities:
-        #     print('  percent aligned:         ' +
-        #           '%.1f' % (100.0 * len(identity_lengths) / len(lengths)) + '%')
-        #     print('  mean identity:           ' +
-        #           '%.1f' % (weighted_average_list(identities, identity_lengths)) + '%')
+                    fasta_str = fastq_read.get_fasta_string()
+                    fastq_str = fastq_read.get_fastq_string()
+
+                    fasta.write(fasta_str)
+                    fastq.write(fastq_str)
+
+                    if fastq_read.sort_score >= good_read_threshold:
+                        good_fasta.write(fasta_str)
+                        good_fastq.write(fastq_str)
+
+                    if fastq_read.sort_score >= v_good_read_threshold:
+                        v_good_fasta.write(fasta_str)
+                        v_good_fastq.write(fastq_str)
+
+        # Delete any empty files. If there was no reference to align to, this will almost
+        # certainly mean deleting the good and very_good files.
+        for read_filename in [x for x in read_filenames if os.stat(x).st_size == 0]:
+            os.remove(read_filename)
 
         # Write the results table to file.
         print('creating table of read info: ' + os.path.basename(info_filename), flush=True)
@@ -374,17 +402,23 @@ class Sample(object):
                       'Mean qscore', 'zlib compression ratio']
             if self.reference:
                 header += ['Alignment identity', 'Alignment reference']
-            header += ['Pass QC']
+            header += ['Quality group']
             info.write('\t'.join(header) + '\n')
             for fastq_read in fastq_reads.values():
                 info.write(fastq_read.get_table_line(bool(self.reference)))
                 info.write('\n')
 
     def make_ggplot_figures(self):
-        _, info_filename = self.get_fastq_paths()
+        _, _, _, info_filename = self.get_read_paths()
         if not os.path.isfile(info_filename):
             print('Could not find tsv file: ' + info_filename)
             return
+
+        have_reference = bool(self.reference)
+        if not have_reference:
+            print('Cannot produce figures with an alignment reference')
+            return
+
         r_script = os.path.join(os.path.dirname(os.path.realpath(__file__)),
                                 'nanopore_read_analysis.R')
 
@@ -426,13 +460,15 @@ class Sample(object):
             os.makedirs(tarball_dir)
         return tarball_dir + self.name + '_fast5.tar.gz'
 
-    def get_fastq_paths(self):
-        fastq_dir = '/home/UNIMELB/inouye-hpc-sa/nanopore-data/fastq/'
+    def get_read_paths(self):
+        fastq_dir = '/home/UNIMELB/inouye-hpc-sa/nanopore-data/fastq/' + self.name + '/'
         if not os.path.exists(fastq_dir):
             os.makedirs(fastq_dir)
         fastq_filename = fastq_dir + self.name + '.fastq.gz'
+        good_fastq_filename = fastq_filename.replace('.fastq.gz', '_good.fastq.gz')
+        v_good_fastq_filename = fastq_filename.replace('.fastq.gz', '_very_good.fastq.gz')
         info_filename = fastq_dir + self.name + '.tsv'
-        return fastq_filename, info_filename
+        return fastq_filename, good_fastq_filename, v_good_fastq_filename, info_filename
 
     def gzip_fast5s(self):
         tarball = self.get_tarball_path()
@@ -456,7 +492,7 @@ class Sample(object):
         # Use pigz if available to speed up the compression.
         pigz_path = shutil.which('pigz')
         if pigz_path:
-            tar_cmd = 'tar cf - ' + ' '.join(rel_dirs) + ' | pigz -9 -p 12 > ' + tarball
+            tar_cmd = 'tar cf - ' + ' '.join(rel_dirs) + ' | pigz -9 -p 8 > ' + tarball
         else:
             tar_cmd = 'tar -czvf ' + tarball + ' '.join(rel_dirs)
 
@@ -847,7 +883,12 @@ class FastqRead(object):
         self.mean_qscore = mean_qscore
         self.alignment_identity = 0.0
         self.alignment_reference_name = ''
-        self.pass_qc = True
+
+        # Quality category levels are:
+        #   * 'bad' or 'unknown' for reads in a set lacking a reference
+        #   * 'bad', 'poor', 'good' and 'very good' for reads in a set with a reference
+        # 'bad' means that it failed the QC checks.
+        self.quality_category = 'unknown'
 
         # Before any alignment, a read's sort score is very low and based only on length and mean
         # qscore.
@@ -864,11 +905,16 @@ class FastqRead(object):
         self.alignment_identity = identity
         self.alignment_reference_name = reference_name
 
-        # Now that the read has been aligned, we can enhance its sort score using its alignment
-        if self.alignment_identity > 50.0:
-            id_frac = self.alignment_identity / 100.0
-            new_sort_score = self.length * (0.99 * 8 * (id_frac - 0.5)**3 + 0.01)
-            self.sort_score = max(new_sort_score, self.sort_score)
+        # Now that the read has been aligned, we can adjust its score and quality category.
+        self.sort_score = max(sort_score_function(self.alignment_identity, self.length),
+                              self.sort_score)
+        if self.sort_score > v_good_read_threshold:
+            self.quality_category = 'very good'
+        elif self.sort_score > good_read_threshold:
+            self.quality_category = 'good'
+        else:
+            self.quality_category = 'poor'
+        # 'bad' isn't an option here because that's set later in the pass_qc_test function.
 
     def get_table_line(self, include_alignment_columns):
         table_line = [self.read_filename, self.sample_name, self.library_type, self.run_name,
@@ -878,8 +924,7 @@ class FastqRead(object):
                       '%.4f' % self.compression_ratio if self.compression_ratio else '']
         if include_alignment_columns:
             table_line += ['%.2f' % self.alignment_identity if self.alignment_identity else '',
-                           self.alignment_reference_name]
-        table_line.append('Y' if self.pass_qc else 'N')
+                           self.alignment_reference_name, self.quality_category]
         return '\t'.join(table_line)
 
     def get_fastq_string(self):
@@ -910,9 +955,11 @@ class FastqRead(object):
         """
         We filter out reads that are too short, aligned to contamination or fail the entropy test.
         """
-        self.pass_qc = self.length >= min_length and not self.is_contamination() and \
+        pass_qc = self.length >= min_length and not self.is_contamination() and \
             not self.has_low_entropy(have_reference)
-        return self.pass_qc
+        if not pass_qc:
+            self.quality_category = 'bad'
+        return pass_qc
 
     def has_low_entropy(self, have_reference):
         if not self.compression_ratio:

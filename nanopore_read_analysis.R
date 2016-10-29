@@ -35,6 +35,7 @@ if (length(args)==0) {
 }
 input_tsv = args[1]
 read_data <- read.delim(input_tsv)
+alignment_data_exists = "Alignment.identity" %in% colnames(read_data)
 
 
 # Reorder the Basecalling factors
@@ -45,8 +46,9 @@ read_data$Basecalling <- factor(read_data$Basecalling, levels = c("normal", "nan
 with_basecalling <- read_data[read_data$Basecalling != 'none',]
 normal_basecalling = read_data[read_data$Basecalling == "normal",]
 nanonet_basecalling = read_data[read_data$Basecalling == "nanonet",]
-with_alignments <- with_basecalling[!is.na(with_basecalling$Alignment.identity),]
-
+if (alignment_data_exists) {
+  with_alignments <- with_basecalling[!is.na(with_basecalling$Alignment.identity),]
+}
 
 # Prepare some theme stuff.
 my_theme <- theme_bw() + theme(aspect.ratio=1, plot.margin=margin(10, 10, 10, 10))
@@ -78,35 +80,6 @@ p2 <- ggplot(with_basecalling, aes(Length, fill = Basecalling)) +
   scale_y_continuous(name="Read count")
 
 
-# Identity histogram
-p3 <- ggplot(with_alignments, aes(Alignment.identity, fill = Basecalling)) +
-  ggtitle("Identity distribution") + 
-  geom_histogram(binwidth = 0.5) +
-  my_theme +
-  scale_x_continuous(name="Alignment identity (%)", limits = c(45, 100), breaks = seq(40, 100, by = 5)) + 
-  scale_y_continuous(name="Read count")
-
-
-# Length vs identity scatter
-p4 <- ggplot(with_alignments, aes(x=Length, y=Alignment.identity, colour=Basecalling)) +
-  ggtitle("Identity against length") + 
-  geom_point(alpha=point_alpha, size=point_size, shape=19) +
-  my_theme +
-  guides(colour = guide_legend(override.aes = list(size=3, alpha=1))) +
-  scale_x_continuous(name="Read length (bp)", trans = "log10", limits = c(100, 100000), breaks = c(100, 1000, 10000, 100000)) +
-  scale_y_continuous(name="Alignment identity (%)", limits = c(50, 100))
-
-
-# Qscore vs identity scatter
-p5 <- ggplot(with_alignments, aes(x=Mean.qscore, y=Alignment.identity, colour=Basecalling)) +
-  ggtitle("Identity against qscore") + 
-  geom_point(alpha=point_alpha, size=point_size, shape=19) +
-  my_theme +
-  guides(colour = guide_legend(override.aes = list(size=3, alpha=1))) +
-  scale_x_continuous(name="Mean qscore", limits = c(0, 20)) +
-  scale_y_continuous(name="Alignment identity (%)", limits = c(50, 100))
-
-
 # Total bases pie chart
 normal_basecalls <- sum(normal_basecalling$Length)
 nanonet_basecalls <- sum(nanonet_basecalling$Length)
@@ -116,7 +89,7 @@ bases <- data.frame(Basecalling = c("normal", "nanonet"),
 bases$Basecalling <- factor(bases$Basecalling, levels = c("normal", "nanonet"))
 text = c(paste(prettyNum(nanonet_basecalls, big.mark=",", scientific=FALSE, preserve.width="none"), " bp"),
          paste(prettyNum(normal_basecalls, big.mark=",", scientific=FALSE, preserve.width="none"), " bp"))
-p6 <- ggplot(bases, aes(x="", y=value, fill=Basecalling)) +
+p3 <- ggplot(bases, aes(x="", y=value, fill=Basecalling)) +
   ggtitle("Total bases") + 
   geom_bar(width = 1, stat = "identity") +
   coord_polar("y") + 
@@ -125,11 +98,49 @@ p6 <- ggplot(bases, aes(x="", y=value, fill=Basecalling)) +
   geom_text(aes(y = mid_y, label = text))
 
 
+# These plots only apply if we have aligned our reads to a reference.
+if (alignment_data_exists) {
+
+  # Identity histogram
+  p4 <- ggplot(with_alignments, aes(Alignment.identity, fill = Basecalling)) +
+    ggtitle("Identity distribution") + 
+    geom_histogram(binwidth = 0.5) +
+    my_theme +
+    scale_x_continuous(name="Alignment identity (%)", limits = c(45, 100), breaks = seq(40, 100, by = 5)) + 
+    scale_y_continuous(name="Read count")
+  
+  
+  # Length vs identity scatter
+  p5 <- ggplot(with_alignments, aes(x=Length, y=Alignment.identity, colour=Basecalling)) +
+    ggtitle("Identity against length") + 
+    geom_point(alpha=point_alpha, size=point_size, shape=19) +
+    my_theme +
+    guides(colour = guide_legend(override.aes = list(size=3, alpha=1))) +
+    scale_x_continuous(name="Read length (bp)", trans = "log10", limits = c(100, 100000), breaks = c(100, 1000, 10000, 100000)) +
+    scale_y_continuous(name="Alignment identity (%)", limits = c(50, 100))
+  
+  
+  # Qscore vs identity scatter
+  p6 <- ggplot(with_alignments, aes(x=Mean.qscore, y=Alignment.identity, colour=Basecalling)) +
+    ggtitle("Identity against qscore") + 
+    geom_point(alpha=point_alpha, size=point_size, shape=19) +
+    my_theme +
+    guides(colour = guide_legend(override.aes = list(size=3, alpha=1))) +
+    scale_x_continuous(name="Mean qscore", limits = c(0, 20)) +
+    scale_y_continuous(name="Alignment identity (%)", limits = c(50, 100))
+}
+
+
 # Save plots to png
 png_name = paste(file_path_sans_ext(input_tsv), "_plots.png", sep="")
 options(bitmapType='cairo')
-png(png_name, width = 5000, height = 3000, res = 300)
-multiplot(p1, p4, p2, p5, p3, p6, cols=3)
+if (alignment_data_exists) {
+  png(png_name, width = 5000, height = 3000, res = 300)
+  multiplot(p1, p4, p2, p5, p3, p6, cols=3)
+} else {
+  png(png_name, width = 5000, height = 1500, res = 300)
+  multiplot(p1, p2, p3, cols=3)
+}
 garbage <- dev.off()
 
 
