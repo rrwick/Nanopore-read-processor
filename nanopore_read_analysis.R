@@ -5,6 +5,11 @@ library(scales)
 library(tools)
 library(grid)
 
+
+normal_basecall_colour = "#2159aa" 
+nanonet_basecall_colour = "#db7726"
+very_good_to_bad_colours = c("#0571b0", "#92c5de", "#f28383", "#87001a")
+
 # Multiple plot function
 # http://www.cookbook-r.com/Graphs/Multiple_graphs_on_one_page_(ggplot2)/
 multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
@@ -38,16 +43,26 @@ read_data <- read.delim(input_tsv)
 alignment_data_exists = "Alignment.identity" %in% colnames(read_data)
 
 
-# Reorder the Basecalling factors
+# Reorder the factors
 read_data$Basecalling <- factor(read_data$Basecalling, levels = c("normal", "nanonet", "none"))
+read_data$Quality.group <- factor(read_data$Quality.group, levels = c("very good", "good", "poor", "bad"))
 
 
 # Make some subsets of the data
 with_basecalling <- read_data[read_data$Basecalling != 'none',]
-normal_basecalling = read_data[read_data$Basecalling == "normal",]
-nanonet_basecalling = read_data[read_data$Basecalling == "nanonet",]
 if (alignment_data_exists) {
   with_alignments <- with_basecalling[!is.na(with_basecalling$Alignment.identity),]
+}
+
+
+# Choose a good base count scale
+total_base_count <- sum(with_basecalling$Length, na.rm = TRUE)
+if (total_base_count > 2000000000) {
+  label.format = scales::unit_format("Gb", 1e-9)
+} else if (total_base_count > 2000000) {
+  label.format = scales::unit_format("Mb", 1e-6)
+} else {
+  label.format = scales::unit_format("kb", 1e-3)
 }
 
 # Prepare some theme stuff.
@@ -61,41 +76,60 @@ point_size = 1 / (1 + (nrow(with_basecalling) / 2000))
 point_alpha = 0.1 + (0.9 / (1 + (nrow(with_basecalling) / 10000)))
 
 
-# Length histogram
-ninety_ninth_percentile <- quantile(with_basecalling$Length, 0.99)[[1]]
-p1 <- ggplot(with_basecalling, aes(Length, fill = Basecalling)) +
-  ggtitle("Length distribution") + 
-  geom_histogram(binwidth = 100) +
+
+
+
+
+# Normal vs nanonet bases
+normal_basecalls <- sum(read_data[read_data$Basecalling == "normal",]$Length, na.rm = TRUE)
+nanonet_basecalls <- sum(read_data[read_data$Basecalling == "nanonet",]$Length, na.rm = TRUE)
+bases <- data.frame(Basecalling = c("normal", "nanonet"),
+                    value = c(normal_basecalls, nanonet_basecalls))
+bases$Basecalling <- factor(bases$Basecalling, levels = c("normal", "nanonet"))
+p1 <- ggplot(bases, aes(x=Basecalling, y=value, fill=Basecalling)) +
+  ggtitle("Base count by basecalling method") + 
+  geom_bar(colour = "black", stat = "identity") +
   my_theme +
-  scale_x_continuous(name="Read length (bp)", limits = c(0, ninety_ninth_percentile)) +
-  scale_y_continuous(name="Read count")
+  scale_y_continuous(labels=label.format) + 
+  scale_fill_manual(values=c(normal_basecall_colour, nanonet_basecall_colour)) +
+  guides(fill=FALSE) +
+  theme(axis.title.x=element_blank(), axis.title.y=element_blank())
+
+
+
+
+
+
+
+# Length histogram
+ninety_fifth_percentile <- quantile(with_basecalling$Length, 0.95)[[1]]
+p2 <- ggplot(with_basecalling, aes(Length, fill = Basecalling)) +
+  ggtitle("Length distribution") + 
+  geom_histogram(binwidth = 50) +
+  my_theme +
+  scale_x_continuous(name="Read length (bp)") +
+  scale_y_continuous(name="Read count") +
+  coord_cartesian(xlim = c(0, ninety_fifth_percentile)) +
+  scale_fill_manual(values=c(normal_basecall_colour, nanonet_basecall_colour)) +
+  guides(fill=FALSE)
+
+
 
 
 # Length histogram (log scale)
-p2 <- ggplot(with_basecalling, aes(Length, fill = Basecalling)) +
+p3 <- ggplot(with_basecalling, aes(Length, fill = Basecalling)) +
   ggtitle("Length distribution (log scale)") + 
   geom_histogram(binwidth = 0.025) +
   my_theme +
-  scale_x_continuous(name="Read length (bp)", trans = "log10", limits = c(100, 100000), breaks = c(100, 1000, 10000, 100000)) +
-  scale_y_continuous(name="Read count")
+  scale_x_continuous(name="Read length (bp)", trans = "log10", breaks = c(10, 100, 1000, 10000, 100000)) +
+  scale_y_continuous(name="Read count") +
+  coord_cartesian(xlim = c(10, 100000)) +
+  scale_fill_manual(values=c(normal_basecall_colour, nanonet_basecall_colour)) +
+  guides(fill=FALSE)
 
 
-# Total bases pie chart
-normal_basecalls <- sum(normal_basecalling$Length)
-nanonet_basecalls <- sum(nanonet_basecalling$Length)
-bases <- data.frame(Basecalling = c("normal", "nanonet"),
-                    value = c(normal_basecalls, nanonet_basecalls),
-                    mid_y = c(nanonet_basecalls / 2, nanonet_basecalls + (normal_basecalls / 2)))
-bases$Basecalling <- factor(bases$Basecalling, levels = c("normal", "nanonet"))
-text = c(paste(prettyNum(nanonet_basecalls, big.mark=",", scientific=FALSE, preserve.width="none"), " bp"),
-         paste(prettyNum(normal_basecalls, big.mark=",", scientific=FALSE, preserve.width="none"), " bp"))
-p3 <- ggplot(bases, aes(x="", y=value, fill=Basecalling)) +
-  ggtitle("Total bases") + 
-  geom_bar(width = 1, stat = "identity") +
-  coord_polar("y") + 
-  blank_theme +
-  theme(axis.text.x=element_blank()) + 
-  geom_text(aes(y = mid_y, label = text))
+
+
 
 
 # These plots only apply if we have aligned our reads to a reference.
@@ -107,27 +141,66 @@ if (alignment_data_exists) {
     geom_histogram(binwidth = 0.5) +
     my_theme +
     scale_x_continuous(name="Alignment identity (%)", limits = c(45, 100), breaks = seq(40, 100, by = 5)) + 
-    scale_y_continuous(name="Read count")
+    scale_y_continuous(name="Read count") +
+    scale_fill_manual(values=c(normal_basecall_colour, nanonet_basecall_colour)) +
+    guides(fill=FALSE)
   
+
   
-  # Length vs identity scatter
   p5 <- ggplot(with_alignments, aes(x=Length, y=Alignment.identity, colour=Basecalling)) +
-    ggtitle("Identity against length") + 
+    ggtitle("Identity vs length") + 
     geom_point(alpha=point_alpha, size=point_size, shape=19) +
     my_theme +
-    guides(colour = guide_legend(override.aes = list(size=3, alpha=1))) +
-    scale_x_continuous(name="Read length (bp)", trans = "log10", limits = c(100, 100000), breaks = c(100, 1000, 10000, 100000)) +
-    scale_y_continuous(name="Alignment identity (%)", limits = c(50, 100))
+    scale_x_continuous(name="Read length (bp)", trans = "log10", breaks = c(10, 100, 1000, 10000, 100000)) +
+    scale_y_continuous(name="Alignment identity (%)") +
+    coord_cartesian(xlim = c(10, 100000), ylim = c(45, 100)) +
+    scale_colour_manual(values=c(normal_basecall_colour, nanonet_basecall_colour)) +
+    guides(colour=FALSE)
+  
+  
+  
+  
+  # Base quality quantity
+  bad_bases <- sum(read_data[read_data$Quality.group == "bad",]$Length, na.rm = TRUE)
+  poor_bases <- sum(read_data[read_data$Quality.group == "poor",]$Length, na.rm = TRUE)
+  good_bases <- sum(read_data[read_data$Quality.group == "good",]$Length, na.rm = TRUE)
+  very_good_bases <- sum(read_data[read_data$Quality.group == "very good",]$Length, na.rm = TRUE)
+  bases <- data.frame(Quality = c("very good", "good", "poor", "bad"),
+                      value = c(very_good_bases, good_bases, poor_bases, bad_bases))
+  bases$Quality <- factor(bases$Quality, levels = c("very good", "good", "poor", "bad"))
+  p6 <- ggplot(bases, aes(x=Quality, y=value, fill=Quality)) +
+    ggtitle("Base count by quality") + 
+    geom_bar(colour = "black", stat = "identity") +
+    my_theme +
+    scale_y_continuous(labels=label.format) +
+    scale_fill_manual(values=very_good_to_bad_colours) +
+    guides(fill=FALSE) +
+    theme(axis.title.x=element_blank(), axis.title.y=element_blank())
+  
+  
+  
+  p7 <- ggplot(with_alignments, aes(x=Length, y=Alignment.identity, colour=Quality.group)) +
+    ggtitle("Identity vs length") + 
+    geom_point(alpha=point_alpha, size=point_size, shape=19) +
+    my_theme +
+    scale_x_continuous(name="Read length (bp)", trans = "log10", breaks = c(10, 100, 1000, 10000, 100000)) +
+    scale_y_continuous(name="Alignment identity (%)") +
+    coord_cartesian(xlim = c(10, 100000), ylim = c(45, 100)) +
+    scale_colour_manual(values=very_good_to_bad_colours) +
+    guides(colour=FALSE)
+  
   
   
   # Qscore vs identity scatter
-  p6 <- ggplot(with_alignments, aes(x=Mean.qscore, y=Alignment.identity, colour=Basecalling)) +
-    ggtitle("Identity against qscore") + 
+  p8 <- ggplot(with_alignments, aes(x=Mean.qscore, y=Alignment.identity, colour=Basecalling)) +
+    ggtitle("Identity vs qscore") + 
     geom_point(alpha=point_alpha, size=point_size, shape=19) +
     my_theme +
-    guides(colour = guide_legend(override.aes = list(size=3, alpha=1))) +
-    scale_x_continuous(name="Mean qscore", limits = c(0, 20)) +
-    scale_y_continuous(name="Alignment identity (%)", limits = c(50, 100))
+    scale_x_continuous(name="Mean qscore") +
+    scale_y_continuous(name="Alignment identity (%)") +
+    coord_cartesian(xlim = c(0, 20), ylim = c(45, 100)) +
+    scale_colour_manual(values=c(normal_basecall_colour, nanonet_basecall_colour)) +
+    guides(colour=FALSE)
 }
 
 
@@ -135,10 +208,10 @@ if (alignment_data_exists) {
 png_name = paste(file_path_sans_ext(input_tsv), "_plots.png", sep="")
 options(bitmapType='cairo')
 if (alignment_data_exists) {
-  png(png_name, width = 5000, height = 3000, res = 300)
-  multiplot(p1, p4, p2, p5, p3, p6, cols=3)
+  png(png_name, width = 4000, height = 4000, res = 300)
+  multiplot(p1, p4, p6, p2, p5, p7, p3, p8, cols=3)
 } else {
-  png(png_name, width = 5000, height = 1500, res = 300)
+  png(png_name, width = 4000, height = 1200, res = 300)
   multiplot(p1, p2, p3, cols=3)
 }
 garbage <- dev.off()

@@ -1119,6 +1119,7 @@ def zlib_compression_ratio(seq):
 
 
 def scp_files(local_filepaths, destination_filepath):
+    # TO DO: get destination file sizes and don't transfer if they are identical.
     while True:
         cmd = 'scp ' + ' '.join(local_filepaths) + ' rwick@helix.vlsci.unimelb.edu.au:' + \
               destination_filepath
