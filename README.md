@@ -1,14 +1,15 @@
 # Nanopore read analysis
 
-This is a couple of scripts I wrote to handle Oxford Nanopore files on our servers. They were only ever intended to run on our servers (at the Centre for Systems Genomics at the University of Melbourne), so if anybody else wants to make use of them, they'll need to do a fair bit of modification!
+This repo contains a script I wrote to handle Oxford Nanopore files on our servers at the Centre for Systems Genomics at the University of Melbourne. They were only ever intended for us, so if anybody else wants to make use of them, they'll need to do a bit of modification!
 
 
 
 ### Basics
 
-This script assumes that all Nanopore reads will be deposited in this folder structure:
+This script assumes that all Nanopore reads will be deposited in this folder structure on Happyfeet:
 `/home/UNIMELB/inouye-hpc-sa/nanopore-data/fast5/TYPE/SAMPLE_NAME`
-where `TYPE` is either `1d` or `2d` and `SAMPLE_NAME` can be any string.
+
+`TYPE` is either `1d` or `2d` and `SAMPLE_NAME` can be any string.
 
 To use the script, go here: `/home/UNIMELB/inouye-hpc-sa/nanopore-data`
 and then run this: `./process_reads.py --help`
@@ -82,6 +83,7 @@ You can then choose which reads to use for downstream stuff, like assembly. E.g.
 This command will use the information in the `tsv` file to produce a `png` of some plots using ggplot: read length histograms and stuff like that. If there are Illumina contigs, then it makes more plots showing the breakdown of quality groups. The plots will be saved in the same directory as the `fastq` files: `/home/UNIMELB/inouye-hpc-sa/nanopore-data/fastq/SAMPLE_NAME`
 
 
+
 ### Command tarball
 
 This command tarballs up all of the fast5 files for the sample and puts it here: `/home/UNIMELB/inouye-hpc-sa/nanopore-data/fast5-gz/SAMPLE_NAME.tar.gz`
@@ -89,11 +91,21 @@ This command tarballs up all of the fast5 files for the sample and puts it here:
 This step can take a while, especially if there are a lot of reads.
 
 
+
 ### Command scp
 
 This final step uses `scp` to transfer the tarball to Helix. When it's done, it will move the sample's `fast5` files to this directory: `/home/UNIMELB/inouye-hpc-sa/nanopore-data/fast5_processed/TYPE/SAMPLE_NAME`
 
 Now that the fast5s have been moved out of the normal directory, they will be excluded from further runs of this script. If, however, you want to include these finished samples, you can run the script with `--include_processed`. Then will look in both `fast5` and `fast5_processed` for read files.
+
+
+
+### Command: all
+
+This will do all of the above steps, in order!
+
+Example: `./process_reads.py --command all --sample all`
+
 
 
 ### License
