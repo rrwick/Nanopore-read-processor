@@ -49,7 +49,7 @@ read_data$Quality.group <- factor(read_data$Quality.group, levels = c("very good
 
 
 # Make some subsets of the data
-with_basecalling <- read_data[read_data$Basecalling != 'none',]
+with_basecalling <- read_data[read_data$Basecalling != 'none' & !is.na(read_data$Basecalling),]
 if (alignment_data_exists) {
   with_alignments <- with_basecalling[!is.na(with_basecalling$Alignment.identity),]
 }
