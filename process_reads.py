@@ -242,12 +242,12 @@ class Sample(object):
 
         # Find a reference, if one exists.
         ref_dir = '/home/UNIMELB/inouye-hpc-sa/nanopore-data/references'
-        ref_files = [f for f in os.listdir(ref_dir)
-                     if f.endswith('.fasta') and self.name[:-3] in f]
-        if ref_files:
-            self.reference = os.path.join(ref_dir, ref_files[0])
-        else:
-            self.reference = None
+        ref_files = [f for f in os.listdir(ref_dir) if f.endswith('.fasta') and
+                     self.name[:-3] in f and 'contam' not in f]
+        contam_files = [f for f in os.listdir(ref_dir) if f.endswith('.fasta') and
+                        self.name[:-3] in f and 'contam' in f]
+        self.reference = os.path.join(ref_dir, ref_files[0]) if ref_files else None
+        self.contamination = os.path.join(ref_dir, contam_files[0]) if contam_files else None
 
     def __repr__(self):
         return self.name + ': ' + ', '.join(self.all_dirs)
@@ -354,10 +354,12 @@ class Sample(object):
         if have_reference:
             print('\naligning reads to ' + os.path.basename(self.reference), flush=True)
             temp_sam = 'temp_' + str(random.randint(0, 100000000)) + '.sam'
+            contam = self.contamination if self.contamination else 'lambda'
+
             command = ['/home/UNIMELB/inouye-hpc-sa/Unicycler/unicycler_align-runner.py',
                        '--ref', self.reference, '--reads', fastq_filename, '--sam', temp_sam,
                        '--no_graphmap', '--threads', str(threads), '--verbosity', '2',
-                       '--contamination', 'lambda', '--keep_bad', '--min_len', '1']
+                       '--contamination', contam, '--keep_bad', '--min_len', '1']
 
             p = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  preexec_fn=lambda: os.nice(20))
