@@ -358,7 +358,7 @@ class Sample(object):
 
             command = ['/home/UNIMELB/inouye-hpc-sa/Unicycler/unicycler_align-runner.py',
                        '--ref', self.reference, '--reads', fastq_filename, '--sam', temp_sam,
-                       '--no_graphmap', '--threads', str(threads), '--verbosity', '2',
+                       '--threads', str(threads), '--verbosity', '2',
                        '--contamination', contam, '--keep_bad', '--min_len', '1']
 
             p = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -933,18 +933,21 @@ def parse_unicycler_align_output(unicycler_out_string, reference_filename):
             while True:
                 try:
                     next_line = next(unicycler_out_iter).strip()
+                    next_line = re.sub('\033.*?m', '', next_line).strip()
                     if not next_line or next_line == 'None' or next_line == 'too short to align':
                         break
-                    alignments.append(next_line)
+                    if not next_line.startswith('Ref name'):
+                        alignments.append(next_line)
                 except StopIteration:
                     break
             identities = []
             lengths = []
             lambda_lengths = []
             for alignment in alignments:
-                identities.append(float(alignment.split('ID: ')[1].split('%')[0]))
-                read_start = int(alignment.split('read pos: ')[1].split('-')[0])
-                read_end = int(alignment.split(', strand')[0].split('-')[1])
+                alignment_parts = alignment.split()
+                identities.append(float(alignment_parts[-1].split('%')[0]))
+                read_start = int(alignment_parts[3])
+                read_end = int(alignment_parts[4])
                 alignment_length = read_end - read_start
                 lengths.append(alignment_length)
                 if 'lambda_phage' in alignment:
