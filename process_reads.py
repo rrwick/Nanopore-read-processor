@@ -245,7 +245,7 @@ class Sample(object):
         ref_files = [f for f in os.listdir(ref_dir) if f.endswith('.fasta') and
                      self.name[:-3] in f and 'contam' not in f]
         contam_files = [f for f in os.listdir(ref_dir) if f.endswith('.fasta') and
-                        self.name[:-3] in f and 'contam' in f]
+                        not f.startswith('.') and self.name[:-3] in f and 'contam' in f]
         self.reference = os.path.join(ref_dir, ref_files[0]) if ref_files else None
         self.contamination = os.path.join(ref_dir, contam_files[0]) if contam_files else None
 
@@ -360,11 +360,12 @@ class Sample(object):
                        '--ref', self.reference, '--reads', fastq_filename, '--sam', temp_sam,
                        '--threads', str(threads), '--verbosity', '2',
                        '--contamination', contam, '--keep_bad', '--min_len', '1']
-
             p = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  preexec_fn=lambda: os.nice(20))
-            out, _ = p.communicate()
+            out, err = p.communicate()
             p.wait()
+            if err:
+                print('Unicycler error:\n' + err.decode())
             os.remove(temp_sam)
 
             alignment_results = parse_unicycler_align_output(out.decode(),
@@ -1057,8 +1058,20 @@ class FastqRead(object):
         """
         We filter out reads that are too short, aligned to contamination or fail the entropy test.
         """
-        pass_qc = self.length >= min_length and not self.is_contamination() and \
-            not self.has_low_entropy(have_reference)
+        pass_qc = True
+        if self.length < min_length:
+            pass_qc = False
+        elif self.is_contamination():
+            pass_qc = False
+        elif self.has_low_entropy(have_reference):
+            pass_qc = False
+
+        # If this read is Nanonet basecalled and we don't have a reference, then it fails QC. This
+        # is because Nanonet doesn't give informative quality scores, so we can't distinguish good
+        # reads from bad reads without a reference.
+        if self.basecalling == 'nanonet' and not have_reference:
+            pass_qc = False
+
         if not pass_qc:
             self.quality_category = 'bad'
         return pass_qc
