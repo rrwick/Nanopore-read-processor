@@ -407,18 +407,18 @@ class Sample(object):
                     fasta.write(fasta_str)
                     fastq.write(fastq_str)
 
-                    if fastq_read.sort_score >= good_read_threshold:
+                    if self.quality_category == 'good' or self.quality_category == 'very good':
                         good_fasta.write(fasta_str)
                         good_fastq.write(fastq_str)
                         at_least_one_good_read = True
 
-                    if fastq_read.sort_score >= v_good_read_threshold:
+                    if self.quality_category == 'very good':
                         v_good_fasta.write(fasta_str)
                         v_good_fastq.write(fastq_str)
                         at_least_one_v_good_read = True
 
-        # Delete any empty files. If there was no reference to align to, this will almost
-        # certainly mean deleting the good and very_good files.
+        # Delete any empty files. If there was no reference to align to, this will definitely
+        # mean deleting the good and very_good files.
         if not at_least_one_v_good_read:
             os.remove(v_good_fasta_filename)
             os.remove(v_good_fastq_filename)
