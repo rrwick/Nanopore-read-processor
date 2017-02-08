@@ -407,12 +407,12 @@ class Sample(object):
                     fasta.write(fasta_str)
                     fastq.write(fastq_str)
 
-                    if self.quality_category == 'good' or self.quality_category == 'very good':
+                    if fastq_read.quality_category == 'good' or fastq_read.quality_category == 'very good':
                         good_fasta.write(fasta_str)
                         good_fastq.write(fastq_str)
                         at_least_one_good_read = True
 
-                    if self.quality_category == 'very good':
+                    if fastq_read.quality_category == 'very good':
                         v_good_fasta.write(fasta_str)
                         v_good_fastq.write(fastq_str)
                         at_least_one_v_good_read = True
