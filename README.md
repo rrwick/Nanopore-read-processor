@@ -1,3 +1,10 @@
+# This tool is deprecated!
+
+It was written back in 2016, and much has since changed in the world of Oxford Nanopore basecalling and read processing. I don't use this script anymore, and you probably shouldn't either!
+
+If you're still interested, the original README follows below:
+
+
 # Nanopore read analysis
 
 This repo contains a script I wrote to handle Oxford Nanopore files on our servers at the Centre for Systems Genomics at the University of Melbourne. They were only ever intended for us, so if anybody else wants to make use of them, they'll need to do a bit of modification!
